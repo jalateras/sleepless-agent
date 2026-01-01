@@ -224,3 +224,7 @@ __marimo__/
 
 workspace/
 tests/
+
+# Claude Code
+.claude/
+.generated/
