@@ -24,6 +24,9 @@ from sleepless_agent.utils.live_status import LiveStatusTracker
 from sleepless_agent.monitoring.report_generator import ReportGenerator
 from sleepless_agent.chat import ChatSessionManager, ChatExecutor, ChatHandler
 from sleepless_agent.storage.feedback import FeedbackStore, classify_reaction, FeedbackType
+from sleepless_agent.core.models import CheckpointStatus
+from sleepless_agent.context import extract_context_for_task
+from sleepless_agent.templates import TemplateLoader
 
 
 class SlackBot:
@@ -40,6 +43,7 @@ class SlackBot:
         live_status_tracker: Optional[LiveStatusTracker] = None,
         workspace_root: str = "./workspace",
         feedback_store: Optional[FeedbackStore] = None,
+        checkpoint_manager=None,
     ):
         """Initialize Slack bot"""
         self.bot_token = bot_token
@@ -51,6 +55,7 @@ class SlackBot:
         self.live_status_tracker = live_status_tracker
         self.workspace_root = Path(workspace_root)
         self.feedback_store = feedback_store
+        self.checkpoint_manager = checkpoint_manager
         self.client = WebClient(token=bot_token)
         self.socket_mode_client = SocketModeClient(app_token=app_token, web_client=self.client)
 
@@ -88,6 +93,8 @@ class SlackBot:
                 self.handle_events_api(req)
             elif req.type == "slash_commands":
                 self.handle_slash_command(req)
+            elif req.type == "interactive":
+                self.handle_interactive_action(req)
         except Exception as e:
             logger.error(f"Error handling event: {e}")
 
@@ -263,6 +270,189 @@ class SlackBot:
             logger.debug(f"Could not get generation source for task {task_id}: {e}")
             return None
 
+    def handle_interactive_action(self, req: SocketModeRequest):
+        """Handle interactive component actions (buttons, menus, etc.)
+
+        This handles Block Kit interactive components like the Approve/Reject
+        buttons in checkpoint messages.
+        """
+        payload = req.payload
+        action_type = payload.get("type")
+
+        if action_type != "block_actions":
+            logger.debug(f"Ignoring interactive action type: {action_type}")
+            return
+
+        actions = payload.get("actions", [])
+        user = payload.get("user", {})
+        user_id = user.get("id", "")
+        channel = payload.get("channel", {})
+        channel_id = channel.get("id", "")
+        message = payload.get("message", {})
+        message_ts = message.get("ts", "")
+        response_url = payload.get("response_url", "")
+
+        for action in actions:
+            action_id = action.get("action_id", "")
+            value = action.get("value", "")
+
+            logger.info(f"Interactive action: {action_id} with value {value} from {user_id}")
+
+            # Handle checkpoint approve/reject buttons
+            if action_id in ("checkpoint_approve", "checkpoint_reject"):
+                self._handle_checkpoint_action(
+                    action_id=action_id,
+                    checkpoint_id=value,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    message_ts=message_ts,
+                    response_url=response_url,
+                )
+
+    def _handle_checkpoint_action(
+        self,
+        action_id: str,
+        checkpoint_id: str,
+        user_id: str,
+        channel_id: str,
+        message_ts: str,
+        response_url: str,
+    ):
+        """Handle checkpoint approval or rejection from Slack button click."""
+        if not self.checkpoint_manager:
+            logger.warning("Checkpoint action received but no checkpoint_manager configured")
+            self._update_checkpoint_message(
+                response_url=response_url,
+                text="Checkpoint system not configured",
+                success=False,
+            )
+            return
+
+        try:
+            checkpoint_id_int = int(checkpoint_id)
+        except ValueError:
+            logger.error(f"Invalid checkpoint ID: {checkpoint_id}")
+            return
+
+        # Determine status based on action
+        if action_id == "checkpoint_approve":
+            status = CheckpointStatus.APPROVED
+            action_text = "approved"
+            emoji = ":white_check_mark:"
+        else:
+            status = CheckpointStatus.REJECTED
+            action_text = "rejected"
+            emoji = ":x:"
+
+        # Resolve the checkpoint
+        checkpoint = self.checkpoint_manager.resolve(
+            checkpoint_id=checkpoint_id_int,
+            status=status,
+            resolved_by=user_id,
+        )
+
+        if not checkpoint:
+            logger.warning(f"Checkpoint {checkpoint_id} not found or already resolved")
+            self._update_checkpoint_message(
+                response_url=response_url,
+                text="Checkpoint already resolved or not found",
+                success=False,
+            )
+            return
+
+        # Get task info for the response
+        task = self.task_queue.get_task(checkpoint.task_id)
+        task_desc = task.description[:50] if task else "Unknown"
+
+        # Update the original message to show resolution
+        self._update_checkpoint_message(
+            response_url=response_url,
+            text=f"{emoji} Checkpoint {action_text} by <@{user_id}>",
+            checkpoint=checkpoint,
+            task_desc=task_desc,
+            success=True,
+        )
+
+        logger.info(
+            f"Checkpoint {checkpoint_id} {action_text} by {user_id} for task {checkpoint.task_id}"
+        )
+
+    def _update_checkpoint_message(
+        self,
+        response_url: str,
+        text: str,
+        success: bool = True,
+        checkpoint=None,
+        task_desc: str = "",
+    ):
+        """Update the checkpoint message after resolution."""
+        import requests
+
+        blocks = []
+
+        if checkpoint:
+            # Build updated message showing resolution
+            type_labels = {
+                "post_plan": "Plan Review",
+                "pre_commit": "Pre-Commit Approval",
+                "pre_pr": "Pull Request Approval",
+            }
+            type_label = type_labels.get(checkpoint.checkpoint_type.value, "Approval")
+            status_emoji = ":white_check_mark:" if checkpoint.status == CheckpointStatus.APPROVED else ":x:"
+
+            blocks = [
+                {
+                    "type": "header",
+                    "text": {
+                        "type": "plain_text",
+                        "text": f"{status_emoji} {type_label} - {checkpoint.status.value.upper()}",
+                        "emoji": True,
+                    },
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*Task #{checkpoint.task_id}*: {self._escape_slack(task_desc)}{'...' if len(task_desc) >= 50 else ''}",
+                    },
+                },
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": text,
+                        }
+                    ],
+                },
+            ]
+        else:
+            # Simple error/info message
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": text,
+                    },
+                },
+            ]
+
+        try:
+            response = requests.post(
+                response_url,
+                json={
+                    "replace_original": True,
+                    "blocks": blocks,
+                    "text": text,
+                },
+                timeout=10,
+            )
+            if response.status_code != 200:
+                logger.error(f"Failed to update checkpoint message: {response.text}")
+        except Exception as e:
+            logger.error(f"Failed to update checkpoint message: {e}")
+
     def handle_slash_command(self, req: SocketModeRequest):
         """Handle slash commands"""
         command = req.payload["command"]
@@ -289,6 +479,8 @@ class SlackBot:
                 self.handle_trash_command(text, response_url)
             elif command == "/usage":
                 self.handle_usage_command(response_url, channel)
+            elif command == "/templates":
+                self.handle_templates_command(response_url)
             else:
                 self.send_response(response_url, f"Unknown command: {command}")
         except Exception as e:
@@ -304,15 +496,89 @@ class SlackBot:
     ):
         """Handle /think command - unified handler for both tasks and thoughts
 
-        Usage: /think <description> [--project=<project_name>]
+        Usage: /think <description> [--project=<project_name>] [--template=<template_name>]
 
         With --project: Creates SERIOUS priority project task
+        With --template: Uses a template to generate the task description
         Without --project: Creates THOUGHT priority one-time task
         """
         if not args:
-            self.send_response(response_url, "Usage: /think <description> [--project=<project_name>]")
+            self.send_response(
+                response_url,
+                "Usage: /think <description> [--project=<project_name>] [--template=<template_name>]\n"
+                "Use /templates to list available templates."
+            )
             return
 
+        # Check for --template flag
+        template_name = None
+        import re
+        template_match = re.search(r'--template[=\s]+(\S+)', args)
+        if template_match:
+            template_name = template_match.group(1)
+            # Remove the --template flag from args
+            args = re.sub(r'--template[=\s]+\S+\s*', '', args).strip()
+
+        # If template is specified, expand it
+        if template_name:
+            loader = TemplateLoader()
+            loader.load_all()
+            template = loader.get_template(template_name)
+
+            if not template:
+                self.send_response(
+                    response_url,
+                    f"Template not found: `{template_name}`\nUse /templates to list available templates."
+                )
+                return
+
+            # Parse template arguments from remaining args
+            template_args = self._parse_template_args_slack(args, template)
+
+            # Validate required arguments
+            is_valid, errors = template.validate_args(template_args)
+            if not is_valid:
+                error_text = f"Template `{template_name}` validation failed:\n"
+                for error in errors:
+                    error_text += f"• {error}\n"
+                required_params = [p.name for p in template.get_required_parameters()]
+                error_text += f"\nUsage: /think --template={template_name} <{', '.join(required_params)}>"
+                self.send_response(response_url, error_text)
+                return
+
+            # Extract codebase context if template requests it
+            context = None
+            if template.context_injection:
+                try:
+                    context = extract_context_for_task(compact=False)
+                except Exception as exc:
+                    logger.warning("context.extraction_failed", error=str(exc))
+
+            # Expand template with context
+            args = template.expand(template_args, context=context)
+
+            # Use template's priority
+            priority_map = {
+                "urgent": TaskPriority.SERIOUS,
+                "serious": TaskPriority.SERIOUS,
+                "thought": TaskPriority.THOUGHT,
+                "generated": TaskPriority.GENERATED,
+            }
+            priority = priority_map.get(template.priority.lower(), TaskPriority.SERIOUS)
+
+            # Create the task directly (no need to prepare_task_creation for templates)
+            self._create_task(
+                description=args.strip(),
+                priority=priority,
+                response_url=response_url,
+                user_id=user_id,
+                note=f"Created from template: {template_name}",
+                project_name=None,
+                project_id=None,
+            )
+            return
+
+        # Standard flow (no template)
         (
             cleaned_description,
             project_name,
@@ -336,6 +602,111 @@ class SlackBot:
             project_name=project_name,
             project_id=project_id,
         )
+
+    def _parse_template_args_slack(self, args: str, template) -> dict[str, str]:
+        """Parse template arguments from Slack command args.
+
+        Similar to CLI parsing but simpler.
+        """
+        result: dict[str, str] = {}
+        parts = args.split()
+
+        # Check if any part contains '='
+        has_kv = any("=" in part for part in parts)
+
+        if has_kv:
+            # Key-value mode
+            current_key = None
+            current_value_parts = []
+
+            for part in parts:
+                if "=" in part:
+                    # Save previous key-value pair
+                    if current_key and current_value_parts:
+                        result[current_key] = " ".join(current_value_parts)
+                    # Start new key-value pair
+                    key, _, value = part.partition("=")
+                    current_key = key
+                    current_value_parts = [value] if value else []
+                elif current_key:
+                    current_value_parts.append(part)
+
+            # Save last key-value pair
+            if current_key and current_value_parts:
+                result[current_key] = " ".join(current_value_parts)
+        else:
+            # Positional mode: entire args is the first required param
+            required = template.get_required_parameters()
+            if required:
+                result[required[0].name] = args
+
+        return result
+
+    def handle_templates_command(self, response_url: str):
+        """Handle /templates command - list available task templates."""
+        loader = TemplateLoader()
+        loader.load_all()
+
+        templates = loader.registry.list_all()
+
+        if not templates:
+            self.send_response(response_url, "No templates found.")
+            return
+
+        # Group by category
+        by_category: dict[str, list] = {}
+        for template in templates:
+            cat = template.category
+            if cat not in by_category:
+                by_category[cat] = []
+            by_category[cat].append(template)
+
+        # Build Slack blocks
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "Available Task Templates",
+                    "emoji": True,
+                }
+            }
+        ]
+
+        for category in sorted(by_category.keys()):
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{category.title()}*"
+                }
+            })
+
+            template_lines = []
+            for template in sorted(by_category[category], key=lambda t: t.name):
+                required_params = [p.name for p in template.get_required_parameters()]
+                params_str = f" `<{', '.join(required_params)}>`" if required_params else ""
+                template_lines.append(f"• `{template.name}`{params_str} - {template.description}")
+
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "\n".join(template_lines)
+                }
+            })
+
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Usage: `/think --template=<name> <target>`  •  Example: `/think --template=add-tests src/module.py`"
+                }
+            ]
+        })
+
+        self.send_response(response_url, "Available templates:", blocks=blocks)
 
     def handle_chat_command(
         self,

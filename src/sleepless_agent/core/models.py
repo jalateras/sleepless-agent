@@ -256,6 +256,22 @@ class FailureType(str, Enum):
     UNKNOWN = "unknown"  # Couldn't classify
 
 
+class CheckpointType(str, Enum):
+    """Types of approval checkpoints in task execution"""
+    POST_PLAN = "post_plan"  # After planning phase, before execution
+    PRE_COMMIT = "pre_commit"  # Before committing changes to git
+    PRE_PR = "pre_pr"  # Before creating a pull request
+
+
+class CheckpointStatus(str, Enum):
+    """Status of a checkpoint approval request"""
+    PENDING = "pending"  # Waiting for user response
+    APPROVED = "approved"  # User approved, continue execution
+    REJECTED = "rejected"  # User rejected, abort task
+    EXPIRED = "expired"  # Timed out waiting for response
+    SKIPPED = "skipped"  # Checkpoint disabled in config
+
+
 class FailurePattern(Base):
     """Track failure patterns for learning and retry suppression.
 
@@ -305,6 +321,69 @@ class FailurePattern(Base):
 
     def __repr__(self):
         return f"<FailurePattern(hash={self.pattern_hash[:8]}..., type={self.failure_type}, count={self.occurrences})>"
+
+
+class Checkpoint(Base):
+    """Track pending approval checkpoints for human-in-the-loop control.
+
+    Checkpoints allow users to approve or reject critical operations
+    (commits, PRs) before they happen. The task execution pauses at
+    the checkpoint until user response or timeout.
+    """
+    __tablename__ = "checkpoints"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, nullable=False)  # Reference to Task
+
+    checkpoint_type = Column(
+        SQLEnum(
+            CheckpointType,
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=False,
+        ),
+        nullable=False,
+    )
+    status = Column(
+        SQLEnum(
+            CheckpointStatus,
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=False,
+        ),
+        default=CheckpointStatus.PENDING,
+        nullable=False,
+    )
+
+    # Slack interaction context
+    message_ts = Column(String(50), nullable=True)  # Message with Approve/Reject buttons
+    channel_id = Column(String(50), nullable=True)  # Channel where checkpoint was posted
+    thread_ts = Column(String(50), nullable=True)  # Thread context
+
+    # Checkpoint details
+    title = Column(String(255), nullable=True)  # Brief description for the approval prompt
+    details = Column(Text, nullable=True)  # JSON with context (files to commit, PR title, etc.)
+
+    # Timing
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)  # When checkpoint times out
+    resolved_at = Column(DateTime, nullable=True)  # When approved/rejected/expired
+    resolved_by = Column(String(100), nullable=True)  # Slack user ID who resolved
+
+    # Resolution details
+    rejection_reason = Column(Text, nullable=True)  # User-provided reason for rejection
+
+    __table_args__ = (
+        Index('ix_checkpoint_task_id', 'task_id'),
+        Index('ix_checkpoint_status', 'status'),
+        Index('ix_checkpoint_type', 'checkpoint_type'),
+        Index('ix_checkpoint_expires', 'expires_at'),
+        # Composite for finding pending checkpoints
+        Index('ix_checkpoint_pending', 'status', 'expires_at'),
+    )
+
+    def __repr__(self):
+        return f"<Checkpoint(task_id={self.task_id}, type={self.checkpoint_type}, status={self.status})>"
 
 
 def init_db(db_path: str) -> Session:

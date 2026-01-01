@@ -1,0 +1,50 @@
+name: debug
+description: Investigate and fix a bug or issue
+category: debugging
+priority: urgent
+context_injection: true
+parameters:
+  - name: issue
+    required: true
+    description: Description of the bug or error message
+  - name: location
+    required: false
+    description: File or area where the issue occurs (if known)
+    default: unknown - investigate
+prompt: |
+  Debug and fix the following issue:
+
+  Issue: {issue}
+  Location hint: {location}
+
+  Debugging process:
+
+  1. **Reproduce**
+     - Understand the steps to trigger the issue
+     - Identify expected vs actual behavior
+
+  2. **Investigate**
+     - Examine error messages and stack traces
+     - Trace the code path
+     - Check related recent changes
+     - Look for similar patterns elsewhere
+
+  3. **Identify Root Cause**
+     - Determine the actual source of the problem
+     - Understand why it happens
+
+  4. **Fix**
+     - Implement the minimal fix for the root cause
+     - Ensure the fix doesn't break other functionality
+     - Add defensive code if appropriate
+
+  5. **Verify**
+     - Confirm the fix resolves the issue
+     - Run existing tests
+     - Add a test case for this specific bug
+
+  6. **Document**
+     - Add comments explaining the fix if non-obvious
+     - Note any related issues to watch for
+
+  Create a brief report summarizing the root cause and fix applied.

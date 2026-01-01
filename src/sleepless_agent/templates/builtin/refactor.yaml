@@ -1,0 +1,38 @@
+name: refactor
+description: Refactor code for clarity, performance, or maintainability
+category: improvement
+priority: serious
+context_injection: true
+parameters:
+  - name: target
+    required: true
+    description: File or function to refactor
+  - name: goal
+    required: false
+    description: Refactoring goal (e.g., "simplify", "optimize", "modularize")
+    default: improve clarity and maintainability
+prompt: |
+  Refactor the following code:
+
+  Target: {target}
+  Goal: {goal}
+
+  Refactoring guidelines:
+  - Preserve existing behavior (no functional changes)
+  - Improve code readability and structure
+  - Extract reusable functions where appropriate
+  - Remove code duplication
+  - Simplify complex conditionals
+  - Improve naming for clarity
+  - Add type hints if missing
+  - Ensure all existing tests still pass
+
+  Steps:
+  1. Analyze the current code structure
+  2. Identify improvement opportunities
+  3. Plan refactoring steps (small, incremental changes)
+  4. Apply refactoring
+  5. Verify tests pass after each change
+  6. Document any significant architectural changes
+
+  If no tests exist, create basic tests first to ensure behavior is preserved.

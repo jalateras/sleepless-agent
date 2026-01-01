@@ -9,8 +9,15 @@ from typing import Iterable, List, Optional, Set, TYPE_CHECKING
 
 from sleepless_agent.monitoring.logging import get_logger
 
-from sleepless_agent.core.models import TaskPriority
+from sleepless_agent.core.models import TaskPriority, CheckpointType
 from sleepless_agent.core.retry import RetryConfig, RetryManager
+from sleepless_agent.core.checkpoints import CheckpointManager, CheckpointConfig
+from sleepless_agent.monitoring.notifications import (
+    NotificationManager,
+    NotificationConfig,
+    ExecutionPhase,
+    BlockerType,
+)
 from sleepless_agent.scheduling.scheduler import SmartScheduler
 from sleepless_agent.core.queue import TaskQueue
 from sleepless_agent.monitoring.report_generator import ReportGenerator, TaskMetrics
@@ -46,6 +53,8 @@ class TaskRuntime:
         live_status_tracker,
         feedback_store: Optional[FeedbackStore] = None,
         retry_config: Optional[RetryConfig] = None,
+        checkpoint_manager: Optional[CheckpointManager] = None,
+        notification_manager: Optional[NotificationManager] = None,
     ):
         self.config = config
         self.task_queue = task_queue
@@ -59,6 +68,8 @@ class TaskRuntime:
         self.bot = bot
         self.live_status_tracker = live_status_tracker
         self.feedback_store = feedback_store
+        self.checkpoint_manager = checkpoint_manager
+        self.notification_manager = notification_manager
 
         # Initialize retry manager
         self.retry_config = retry_config or RetryConfig()
@@ -88,6 +99,27 @@ class TaskRuntime:
             "task.start",
             description=task.description,
         )
+
+        # Start notification tracking if available
+        if self.notification_manager:
+            # Get Slack context for notifications
+            channel_id = None
+            thread_ts = task.slack_thread_ts
+            if task.assigned_to and self.bot:
+                # Use DM channel for assigned user
+                channel_id = task.assigned_to
+            self.notification_manager.start_task_tracking(
+                task_id=task.id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+            )
+            # Start heartbeat for long-running tasks
+            await self.notification_manager.start_heartbeat(task.id)
+            # Notify execution starting
+            await self.notification_manager.notify_phase_transition(
+                task_id=task.id,
+                new_phase=ExecutionPhase.EXECUTING,
+            )
 
         start_time = time.time()
         result_output: str = ""
@@ -150,14 +182,53 @@ class TaskRuntime:
 
             if workspace and workspace.exists():
                 self.claude.cleanup_workspace_caches(workspace)
-                git_commit_sha = self._maybe_commit_changes(
-                    task=task,
-                    task_log=task_log,
-                    workspace=workspace,
-                    files_modified=files_modified,
-                    result_output=result_output,
-                    git_branch=git_branch,
-                )
+
+                # Request pre-commit approval if checkpoints enabled
+                should_commit = True
+                if self.checkpoint_manager and files_modified:
+                    # Notify phase transition to committing
+                    if self.notification_manager:
+                        await self.notification_manager.notify_phase_transition(
+                            task_id=task.id,
+                            new_phase=ExecutionPhase.COMMITTING,
+                            details={"files_count": len(files_modified)},
+                        )
+
+                    # Get Slack context for checkpoint
+                    channel_id = task.assigned_to if task.assigned_to else None
+                    thread_ts = task.slack_thread_ts
+
+                    checkpoint_result = await self.checkpoint_manager.request_approval(
+                        task=task,
+                        checkpoint_type=CheckpointType.PRE_COMMIT,
+                        title=f"Commit {len(files_modified)} file(s) to {git_branch}",
+                        details={
+                            "files": files_modified[:20],  # Limit to first 20 files
+                            "branch": git_branch,
+                            "commit_message": f"Task #{task.id}: {task.description[:60]}",
+                        },
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                    )
+
+                    if not checkpoint_result.should_proceed:
+                        should_commit = False
+                        task_log.warning(
+                            "task.git.checkpoint_rejected",
+                            status=checkpoint_result.status.value,
+                            reason=checkpoint_result.rejection_reason,
+                        )
+
+                git_commit_sha = None
+                if should_commit:
+                    git_commit_sha = self._maybe_commit_changes(
+                        task=task,
+                        task_log=task_log,
+                        workspace=workspace,
+                        files_modified=files_modified,
+                        result_output=result_output,
+                        git_branch=git_branch,
+                    )
 
                 if git_commit_sha:
                     self.results.update_result_commit_info(
@@ -181,6 +252,17 @@ class TaskRuntime:
                 )
                 self.task_queue.mark_failed(task.id, f"Evaluator status: {eval_status}")
                 self._log_failure_metrics(task=task, duration=processing_time, error=f"Evaluator: {eval_status}")
+
+                # Send failure notification
+                if self.notification_manager:
+                    await self.notification_manager.notify_completion(
+                        task_id=task.id,
+                        success=False,
+                        summary=f"Evaluator status: {eval_status}",
+                        details={"eval_status": eval_status},
+                    )
+                    self.notification_manager.stop_task_tracking(task.id)
+
                 task_log.info(
                     "task.complete",
                     status="failed",
@@ -200,6 +282,24 @@ class TaskRuntime:
                     usage_metrics=usage_metrics,
                     result_output=result_output,
                 )
+
+                # Send success notification
+                if self.notification_manager:
+                    summary = f"Modified {len(files_modified)} file(s)"
+                    if git_commit_sha:
+                        summary += f", committed as {git_commit_sha[:8]}"
+                    await self.notification_manager.notify_completion(
+                        task_id=task.id,
+                        success=True,
+                        summary=summary,
+                        details={
+                            "files_modified": len(files_modified),
+                            "git_commit": git_commit_sha,
+                            "git_pr_url": git_pr_url,
+                        },
+                    )
+                    self.notification_manager.stop_task_tracking(task.id)
+
                 task_log.info(
                     "task.complete",
                     status="completed",
@@ -234,7 +334,20 @@ class TaskRuntime:
             # Check if we should retry
             retry_decision = self.retry_manager.should_retry(task, error_str)
 
+            # Classify blocker type for notifications
+            blocker_type = self._classify_blocker(error_str)
+
             if retry_decision.should_retry:
+                # Send blocker notification with retry info
+                if self.notification_manager:
+                    await self.notification_manager.notify_blocker(
+                        task_id=task.id,
+                        blocker_type=blocker_type,
+                        message=error_str[:200],
+                        will_retry=True,
+                        retry_after_seconds=int(retry_decision.delay_seconds),
+                    )
+
                 # Schedule retry
                 await self._handle_retry(
                     task=task,
@@ -244,6 +357,23 @@ class TaskRuntime:
                     retry_decision=retry_decision,
                 )
             else:
+                # Send blocker notification without retry
+                if self.notification_manager:
+                    await self.notification_manager.notify_blocker(
+                        task_id=task.id,
+                        blocker_type=blocker_type,
+                        message=error_str[:200],
+                        will_retry=False,
+                    )
+                    # Send failure notification
+                    await self.notification_manager.notify_completion(
+                        task_id=task.id,
+                        success=False,
+                        summary=f"Failed: {error_str[:100]}",
+                        details={"error": error_str, "retry_info": retry_decision.reason},
+                    )
+                    self.notification_manager.stop_task_tracking(task.id)
+
                 # Final failure - no more retries
                 self.task_queue.mark_failed(task.id, error_str)
                 self._log_failure_metrics(task=task, duration=processing_time, error=error_str)
@@ -578,6 +708,44 @@ class TaskRuntime:
                 self.live_status_tracker.clear(task.id)
             except Exception as exc:
                 logger.debug(f"Failed to clear live status for task {task.id}: {exc}")
+
+    def _classify_blocker(self, error_str: str) -> BlockerType:
+        """Classify an error string into a blocker type for notifications.
+
+        Args:
+            error_str: The error message
+
+        Returns:
+            BlockerType classification
+        """
+        error_lower = error_str.lower()
+
+        # Rate limit patterns
+        rate_limit_patterns = ["rate limit", "rate-limit", "too many requests", "429", "quota exceeded"]
+        if any(pattern in error_lower for pattern in rate_limit_patterns):
+            return BlockerType.RATE_LIMIT
+
+        # Timeout patterns
+        timeout_patterns = ["timeout", "timed out", "deadline exceeded"]
+        if any(pattern in error_lower for pattern in timeout_patterns):
+            return BlockerType.TIMEOUT
+
+        # Permission patterns
+        permission_patterns = ["permission denied", "access denied", "forbidden", "403", "unauthorized", "401"]
+        if any(pattern in error_lower for pattern in permission_patterns):
+            return BlockerType.PERMISSION_ERROR
+
+        # Missing dependency patterns
+        dependency_patterns = ["not found", "no such file", "import error", "module not found", "package not found"]
+        if any(pattern in error_lower for pattern in dependency_patterns):
+            return BlockerType.MISSING_DEPENDENCY
+
+        # API error patterns
+        api_patterns = ["api error", "connection error", "network error", "500", "502", "503", "504"]
+        if any(pattern in error_lower for pattern in api_patterns):
+            return BlockerType.API_ERROR
+
+        return BlockerType.UNKNOWN
 
     def _log_failure_metrics(self, *, task, duration: int, error: str) -> None:
         try:

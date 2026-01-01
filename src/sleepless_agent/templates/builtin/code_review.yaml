@@ -1,0 +1,33 @@
+name: code-review
+description: Review code for issues and suggest improvements
+category: quality
+priority: serious
+context_injection: true
+parameters:
+  - name: target
+    required: true
+    description: File or directory to review
+  - name: focus
+    required: false
+    description: Areas to focus on (e.g., "security", "performance", "readability")
+    default: all aspects
+prompt: |
+  Perform a thorough code review of the following:
+
+  Target: {target}
+  Focus areas: {focus}
+
+  Review criteria:
+  1. **Correctness**: Logic errors, edge cases, potential bugs
+  2. **Security**: Input validation, injection risks, authentication/authorization
+  3. **Performance**: Inefficient algorithms, unnecessary operations, memory leaks
+  4. **Readability**: Naming, structure, comments, complexity
+  5. **Best Practices**: Design patterns, idiomatic code, DRY principle
+  6. **Error Handling**: Exception management, failure modes, recovery
+
+  For each issue found:
+  - Describe the problem
+  - Explain the impact
+  - Suggest a specific fix with code
+
+  Create a markdown report with findings organized by severity (Critical, High, Medium, Low).

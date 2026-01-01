@@ -1,0 +1,29 @@
+name: add-tests
+description: Add unit tests for specified file or module
+category: testing
+priority: serious
+context_injection: true
+parameters:
+  - name: target
+    required: true
+    description: File or module path to test
+  - name: coverage
+    required: false
+    description: Focus area (e.g., "edge cases", "error handling")
+    default: all cases
+prompt: |
+  Create comprehensive unit tests for the following file:
+
+  Target: {target}
+  Coverage focus: {coverage}
+
+  Requirements:
+  - Use the project's existing test framework (detect from existing tests)
+  - Cover happy paths and edge cases
+  - Include docstrings explaining each test
+  - Follow existing test naming conventions
+  - Place tests in the appropriate test directory
+  - Mock external dependencies appropriately
+  - Aim for high coverage of the target code
+
+  If test files already exist for this module, extend them rather than creating duplicates.

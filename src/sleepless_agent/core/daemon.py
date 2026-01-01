@@ -21,6 +21,8 @@ from sleepless_agent.core.retry import RetryConfig
 from sleepless_agent.core.task_runtime import TaskRuntime
 from sleepless_agent.core.timeout_manager import TaskTimeoutManager
 from sleepless_agent.core.executor import ClaudeCodeExecutor
+from sleepless_agent.core.checkpoints import CheckpointManager, CheckpointConfig
+from sleepless_agent.monitoring.notifications import NotificationManager, NotificationConfig
 from sleepless_agent.storage.git import GitManager
 from sleepless_agent.utils.live_status import LiveStatusTracker
 from sleepless_agent.storage.workspace import WorkspaceSetup
@@ -134,6 +136,15 @@ class SleeplessAgent:
             base_path=str(self.config.agent.db_path.parent / "reports")
         )
 
+        # Initialize checkpoint manager for human-in-the-loop approvals
+        checkpoint_config_dict = getattr(self.config, 'checkpoints', {}) or {}
+        checkpoint_config = CheckpointConfig.from_dict(checkpoint_config_dict)
+        self.checkpoint_manager = CheckpointManager(
+            db_path=str(self.config.agent.db_path),
+            config=checkpoint_config,
+            slack_client=None,  # Will be set after bot is initialized
+        )
+
         self.bot = SlackBot(
             bot_token=self.config.slack.bot_token,
             app_token=self.config.slack.app_token,
@@ -144,6 +155,18 @@ class SleeplessAgent:
             live_status_tracker=self.live_status_tracker,
             workspace_root=str(self.config.agent.workspace_root),
             feedback_store=self.feedback_store,
+            checkpoint_manager=self.checkpoint_manager,
+        )
+
+        # Now set the Slack client on checkpoint manager
+        self.checkpoint_manager.slack_client = self.bot.client
+
+        # Initialize notification manager for proactive progress updates
+        notification_config_dict = getattr(self.config, 'notifications', {}) or {}
+        notification_config = NotificationConfig.from_dict(notification_config_dict)
+        self.notification_manager = NotificationManager(
+            config=notification_config,
+            slack_client=self.bot.client,
         )
 
         self.timeout_manager = TaskTimeoutManager(
@@ -171,6 +194,8 @@ class SleeplessAgent:
             live_status_tracker=self.live_status_tracker,
             feedback_store=self.feedback_store,
             retry_config=self.retry_config,
+            checkpoint_manager=self.checkpoint_manager,
+            notification_manager=self.notification_manager,
         )
 
         signal.signal(signal.SIGINT, self._signal_handler)

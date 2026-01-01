@@ -15,7 +15,9 @@ from typing import Optional
 from sleepless_agent.monitoring.logging import get_logger
 logger = get_logger(__name__)
 
+from sleepless_agent.context import extract_context_for_task
 from sleepless_agent.tasks.utils import slugify_project
+from sleepless_agent.templates import TemplateLoader, TemplateRegistry
 
 from rich import box
 from rich.align import Align
@@ -81,8 +83,58 @@ def build_context(args: argparse.Namespace) -> CLIContext:
 
 
 
-def command_task(ctx: CLIContext, description: str, priority: TaskPriority, project_name: Optional[str] = None) -> int:
-    """Create a task with the given priority."""
+def command_task(
+    ctx: CLIContext,
+    description: str,
+    priority: TaskPriority,
+    project_name: Optional[str] = None,
+    template_name: Optional[str] = None,
+) -> int:
+    """Create a task with the given priority, optionally from a template."""
+
+    # Handle template expansion
+    if template_name:
+        loader = TemplateLoader()
+        loader.load_all()
+        template = loader.get_template(template_name)
+
+        if not template:
+            print(f"Template not found: {template_name}", file=sys.stderr)
+            print("Use 'sle templates' to list available templates.", file=sys.stderr)
+            return 1
+
+        # Parse arguments from description (format: "key=value key2=value2" or positional for 'target')
+        args = _parse_template_args(description, template)
+
+        # Validate required arguments
+        is_valid, errors = template.validate_args(args)
+        if not is_valid:
+            print(f"Template '{template_name}' validation failed:", file=sys.stderr)
+            for error in errors:
+                print(f"  - {error}", file=sys.stderr)
+            print(f"\nUsage: sle think --template={template_name} <target> [key=value ...]", file=sys.stderr)
+            return 1
+
+        # Extract codebase context if template requests it
+        context = None
+        if template.context_injection:
+            try:
+                context = extract_context_for_task(compact=False)
+            except Exception as exc:
+                logger.warning("context.extraction_failed", error=str(exc))
+
+        # Expand the template with context
+        description = template.expand(args, context=context)
+
+        # Use template's priority if not overridden
+        priority_map = {
+            "urgent": TaskPriority.SERIOUS,
+            "serious": TaskPriority.SERIOUS,
+            "thought": TaskPriority.THOUGHT,
+            "generated": TaskPriority.GENERATED,
+        }
+        if not project_name:  # Only use template priority if no project (no override)
+            priority = priority_map.get(template.priority.lower(), TaskPriority.SERIOUS)
 
     if not description.strip():
         print("Description cannot be empty", file=sys.stderr)
@@ -108,9 +160,126 @@ def command_task(ctx: CLIContext, description: str, priority: TaskPriority, proj
     else:
         label = "Generated"
     project_info = f" [Project: {final_project_name}]" if final_project_name else ""
-    print(f"{label} task #{task.id} queued{project_info}:\n{cleaned_description}")
+
+    # Show template info if used
+    template_info = f" (from template: {template_name})" if template_name else ""
+    print(f"{label} task #{task.id} queued{project_info}{template_info}:")
+
+    # Show truncated description for template tasks (full prompt can be long)
+    if template_name and len(cleaned_description) > 200:
+        print(f"{cleaned_description[:200]}...")
+    else:
+        print(cleaned_description)
+
     if note:
         print(note, file=sys.stderr)
+    return 0
+
+
+def _parse_template_args(description: str, template) -> dict[str, str]:
+    """Parse template arguments from description string.
+
+    Supports two formats:
+    1. Positional: "src/module.py" -> assigns to first required param (usually 'target')
+    2. Key-value: "target=src/module.py coverage=edge cases"
+
+    Args:
+        description: The argument string
+        template: TaskTemplate instance
+
+    Returns:
+        Dictionary of argument name -> value
+    """
+    args: dict[str, str] = {}
+    parts = description.split()
+
+    # Check if any part contains '='
+    has_kv = any("=" in part for part in parts)
+
+    if has_kv:
+        # Key-value mode: parse key=value pairs
+        current_key = None
+        current_value_parts = []
+
+        for part in parts:
+            if "=" in part and current_key is None:
+                # New key=value pair
+                key, _, value = part.partition("=")
+                if current_key and current_value_parts:
+                    args[current_key] = " ".join(current_value_parts)
+                current_key = key
+                current_value_parts = [value] if value else []
+            elif current_key:
+                # Continue current value
+                current_value_parts.append(part)
+            else:
+                # First positional before any key=value
+                required = template.get_required_parameters()
+                if required and required[0].name not in args:
+                    args[required[0].name] = part
+
+        # Save last key-value pair
+        if current_key and current_value_parts:
+            args[current_key] = " ".join(current_value_parts)
+    else:
+        # Positional mode: entire description is the first required param
+        required = template.get_required_parameters()
+        if required:
+            args[required[0].name] = description
+
+    return args
+
+
+def command_templates(ctx: CLIContext) -> int:
+    """List available task templates."""
+
+    console = Console()
+    loader = TemplateLoader()
+    loader.load_all()
+
+    templates = loader.registry.list_all()
+
+    if not templates:
+        console.print("[yellow]No templates found.[/]")
+        console.print("Templates are loaded from:")
+        console.print("  • Built-in: package/templates/builtin/")
+        console.print("  • User: ~/.sleepless/templates/")
+        console.print("  • Project: .sleepless/templates/")
+        return 0
+
+    # Group by category
+    by_category: dict[str, list] = {}
+    for template in templates:
+        cat = template.category
+        if cat not in by_category:
+            by_category[cat] = []
+        by_category[cat].append(template)
+
+    console.print("\n[bold cyan]Available Task Templates[/]\n")
+
+    for category in sorted(by_category.keys()):
+        console.print(f"[bold magenta]{category.title()}[/]")
+
+        table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        table.add_column("Name", style="green bold")
+        table.add_column("Params", style="yellow")
+        table.add_column("Description")
+
+        for template in sorted(by_category[category], key=lambda t: t.name):
+            required_params = [p.name for p in template.get_required_parameters()]
+            optional_params = [f"[{p.name}]" for p in template.get_optional_parameters()]
+            all_params = required_params + optional_params
+            params_str = ", ".join(all_params) if all_params else "-"
+
+            table.add_row(template.name, params_str, template.description)
+
+        console.print(table)
+        console.print()
+
+    console.print("[dim]Usage: sle think --template=<name> <target> [key=value ...][/]")
+    console.print("[dim]Example: sle think --template=add-tests src/module.py[/]")
+    console.print()
+
     return 0
 
 
@@ -933,7 +1102,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     think_parser = subparsers.add_parser("think", help="Create a task or capture a thought")
     think_parser.add_argument("-p", "--project", help="Project name (optional). With -p: creates SERIOUS priority project task. Without -p: creates THOUGHT priority one-time task.")
-    think_parser.add_argument("description", nargs='+', help="Task/thought description")
+    think_parser.add_argument("-t", "--template", help="Use a template (e.g., add-tests, code-review, refactor, document, debug)")
+    think_parser.add_argument("description", nargs='*', help="Task/thought description or template arguments")
+
+    subparsers.add_parser("templates", help="List available task templates")
 
     subparsers.add_parser("check", help="Show comprehensive system overview with rich output")
     subparsers.add_parser("usage", help="Show Claude Code Pro plan usage")
@@ -963,12 +1135,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     ctx = build_context(args)
 
     if args.command == "think":
-        description = " ".join(args.description).strip()
-        if not description:
-            parser.error("think requires a description")
+        description = " ".join(args.description).strip() if args.description else ""
+        # For template mode, description can be empty if template has no required params
+        if not description and not args.template:
+            parser.error("think requires a description or --template")
         # Determine priority based on whether project is provided
         priority = TaskPriority.SERIOUS if args.project else TaskPriority.THOUGHT
-        return command_task(ctx, description, priority, args.project)
+        return command_task(ctx, description, priority, args.project, args.template)
+
+    if args.command == "templates":
+        return command_templates(ctx)
 
     if args.command == "check":
         return command_check(ctx)

@@ -35,6 +35,49 @@ multi_agent_workflow:
     enabled: true
     max_turns: 10
 
+# Human-in-the-loop checkpoints for approval before critical operations
+checkpoints:
+  enabled: true
+  global_defaults:
+    post_plan: false  # Require approval after planning phase
+    pre_commit: true  # Require approval before committing changes
+    pre_pr: true  # Require approval before creating pull requests
+  timeout_minutes: 60  # How long to wait for approval
+  timeout_behavior: notify  # proceed | abort | notify
+  poll_interval_seconds: 5.0  # How often to check for approval
+
+# Proactive progress notifications to Slack
+notifications:
+  enabled: true
+  phase_notifications: true  # Notify on phase transitions (planning, executing, etc.)
+  milestone_notifications: true  # Notify on significant milestones
+  blocker_notifications: true  # Notify on blockers (rate limits, errors)
+  heartbeat_enabled: true  # Send periodic "still working" signals
+  heartbeat_interval_minutes: 10  # Minutes between heartbeat messages
+  batch_window_seconds: 5.0  # Time window for batching rapid notifications
+  min_phase_duration_seconds: 30.0  # Minimum time in phase before notifying
+
+# Task templates for common workflows
+templates:
+  enabled: true
+  # Additional template directories (beyond builtin)
+  user_templates_dir: ~/.sleepless/templates
+  project_templates_dir: .sleepless/templates
+
+# Codebase context injection for task prompts
+context:
+  enabled: true
+  cache_ttl_minutes: 5  # How long to cache extracted context
+  structure:
+    enabled: true
+    max_depth: 4  # Maximum directory depth to traverse
+  conventions:
+    enabled: true
+  git:
+    enabled: true
+    commit_limit: 10  # Number of recent commits to include
+    file_limit: 20  # Number of recently modified files to track
+
 auto_generation:
   enabled: true
   prompts:

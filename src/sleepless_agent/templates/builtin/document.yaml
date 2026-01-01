@@ -1,0 +1,44 @@
+name: document
+description: Add or improve documentation for code
+category: documentation
+priority: thought
+context_injection: true
+parameters:
+  - name: target
+    required: true
+    description: File, module, or project to document
+  - name: type
+    required: false
+    description: Documentation type (e.g., "api", "readme", "tutorial", "inline")
+    default: comprehensive
+prompt: |
+  Create or improve documentation for:
+
+  Target: {target}
+  Documentation type: {type}
+
+  Documentation requirements:
+
+  For **inline documentation**:
+  - Add/improve docstrings for all public functions and classes
+  - Include parameter descriptions with types
+  - Document return values and exceptions
+  - Add usage examples in docstrings
+
+  For **README/guides**:
+  - Project overview and purpose
+  - Installation instructions
+  - Quick start guide with examples
+  - Configuration options
+  - API reference (if applicable)
+  - Troubleshooting section
+
+  For **API documentation**:
+  - Complete endpoint/function reference
+  - Request/response formats
+  - Error codes and handling
+  - Authentication requirements
+  - Rate limits and constraints
+
+  Follow the project's existing documentation style and format.
+  Place documentation in appropriate locations (docs/, README.md, inline).
