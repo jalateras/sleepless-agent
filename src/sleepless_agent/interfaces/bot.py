@@ -27,6 +27,7 @@ from sleepless_agent.storage.feedback import FeedbackStore, classify_reaction, F
 from sleepless_agent.core.models import CheckpointStatus
 from sleepless_agent.context import extract_context_for_task
 from sleepless_agent.templates import TemplateLoader
+from sleepless_agent.interfaces.streaming import StreamManager
 
 
 class SlackBot:
@@ -44,6 +45,7 @@ class SlackBot:
         workspace_root: str = "./workspace",
         feedback_store: Optional[FeedbackStore] = None,
         checkpoint_manager=None,
+        stream_manager: Optional[StreamManager] = None,
     ):
         """Initialize Slack bot"""
         self.bot_token = bot_token
@@ -56,6 +58,7 @@ class SlackBot:
         self.workspace_root = Path(workspace_root)
         self.feedback_store = feedback_store
         self.checkpoint_manager = checkpoint_manager
+        self.stream_manager = stream_manager
         self.client = WebClient(token=bot_token)
         self.socket_mode_client = SocketModeClient(app_token=app_token, web_client=self.client)
 
@@ -309,6 +312,15 @@ class SlackBot:
                     response_url=response_url,
                 )
 
+            # Handle stream pause/resume buttons
+            elif action_id in ("stream_pause", "stream_resume"):
+                self._handle_stream_action(
+                    action_id=action_id,
+                    task_id=value,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                )
+
     def _handle_checkpoint_action(
         self,
         action_id: str,
@@ -376,6 +388,49 @@ class SlackBot:
         logger.info(
             f"Checkpoint {checkpoint_id} {action_text} by {user_id} for task {checkpoint.task_id}"
         )
+
+    def _handle_stream_action(
+        self,
+        action_id: str,
+        task_id: str,
+        user_id: str,
+        channel_id: str,
+    ):
+        """Handle stream pause/resume from Slack button click."""
+        if not self.stream_manager:
+            logger.warning("Stream action received but no stream_manager configured")
+            return
+
+        try:
+            task_id_int = int(task_id)
+        except ValueError:
+            logger.error(f"Invalid task ID for stream action: {task_id}")
+            return
+
+        # Get async loop for running coroutines
+        loop = self._get_async_loop()
+
+        if action_id == "stream_pause":
+            future = asyncio.run_coroutine_threadsafe(
+                self.stream_manager.pause_stream(task_id_int),
+                loop,
+            )
+            success = future.result(timeout=5.0)
+            if success:
+                logger.info(f"Stream paused for task {task_id} by {user_id}")
+            else:
+                logger.warning(f"Failed to pause stream for task {task_id}")
+
+        elif action_id == "stream_resume":
+            future = asyncio.run_coroutine_threadsafe(
+                self.stream_manager.resume_stream(task_id_int),
+                loop,
+            )
+            success = future.result(timeout=5.0)
+            if success:
+                logger.info(f"Stream resumed for task {task_id} by {user_id}")
+            else:
+                logger.warning(f"Failed to resume stream for task {task_id}")
 
     def _update_checkpoint_message(
         self,

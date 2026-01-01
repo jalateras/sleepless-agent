@@ -23,6 +23,7 @@ from sleepless_agent.core.timeout_manager import TaskTimeoutManager
 from sleepless_agent.core.executor import ClaudeCodeExecutor
 from sleepless_agent.core.checkpoints import CheckpointManager, CheckpointConfig
 from sleepless_agent.monitoring.notifications import NotificationManager, NotificationConfig
+from sleepless_agent.interfaces.streaming import StreamManager, StreamConfig
 from sleepless_agent.storage.git import GitManager
 from sleepless_agent.utils.live_status import LiveStatusTracker
 from sleepless_agent.storage.workspace import WorkspaceSetup
@@ -169,6 +170,16 @@ class SleeplessAgent:
             slack_client=self.bot.client,
         )
 
+        # Initialize stream manager for real-time task output streaming
+        streaming_config_dict = getattr(self.config, 'streaming', {}) or {}
+        stream_config = StreamConfig.from_dict(streaming_config_dict)
+        self.stream_manager = StreamManager(
+            config=stream_config,
+            slack_client=self.bot.client,
+        )
+        # Set stream manager on bot for pause/resume handling
+        self.bot.stream_manager = self.stream_manager
+
         self.timeout_manager = TaskTimeoutManager(
             config=self.config,
             task_queue=self.task_queue,
@@ -196,6 +207,7 @@ class SleeplessAgent:
             retry_config=self.retry_config,
             checkpoint_manager=self.checkpoint_manager,
             notification_manager=self.notification_manager,
+            stream_manager=self.stream_manager,
         )
 
         signal.signal(signal.SIGINT, self._signal_handler)

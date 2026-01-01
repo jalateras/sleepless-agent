@@ -18,6 +18,7 @@ from sleepless_agent.monitoring.notifications import (
     ExecutionPhase,
     BlockerType,
 )
+from sleepless_agent.interfaces.streaming import StreamManager
 from sleepless_agent.scheduling.scheduler import SmartScheduler
 from sleepless_agent.core.queue import TaskQueue
 from sleepless_agent.monitoring.report_generator import ReportGenerator, TaskMetrics
@@ -55,6 +56,7 @@ class TaskRuntime:
         retry_config: Optional[RetryConfig] = None,
         checkpoint_manager: Optional[CheckpointManager] = None,
         notification_manager: Optional[NotificationManager] = None,
+        stream_manager: Optional[StreamManager] = None,
     ):
         self.config = config
         self.task_queue = task_queue
@@ -70,6 +72,7 @@ class TaskRuntime:
         self.feedback_store = feedback_store
         self.checkpoint_manager = checkpoint_manager
         self.notification_manager = notification_manager
+        self.stream_manager = stream_manager
 
         # Initialize retry manager
         self.retry_config = retry_config or RetryConfig()
@@ -120,6 +123,17 @@ class TaskRuntime:
                 task_id=task.id,
                 new_phase=ExecutionPhase.EXECUTING,
             )
+
+        # Start real-time streaming if available
+        if self.stream_manager:
+            stream_channel = task.assigned_to if task.assigned_to else None
+            if stream_channel:
+                await self.stream_manager.start_stream(
+                    task_id=task.id,
+                    channel_id=stream_channel,
+                    thread_ts=task.slack_thread_ts,
+                    initial_message=f":arrows_counterclockwise: *Task #{task.id}* - Starting execution...\n_{task.description[:100]}_",
+                )
 
         start_time = time.time()
         result_output: str = ""
@@ -263,6 +277,14 @@ class TaskRuntime:
                     )
                     self.notification_manager.stop_task_tracking(task.id)
 
+                # Finalize stream with failure
+                if self.stream_manager:
+                    await self.stream_manager.finalize_stream(
+                        task_id=task.id,
+                        final_content=f"\n:warning: Evaluator status: {eval_status}",
+                        success=False,
+                    )
+
                 task_log.info(
                     "task.complete",
                     status="failed",
@@ -299,6 +321,15 @@ class TaskRuntime:
                         },
                     )
                     self.notification_manager.stop_task_tracking(task.id)
+
+                # Finalize stream with success
+                if self.stream_manager:
+                    await self.stream_manager.finalize_stream(
+                        task_id=task.id,
+                        final_content=f"\n:white_check_mark: Modified {len(files_modified)} file(s)" +
+                                      (f", committed as `{git_commit_sha[:8]}`" if git_commit_sha else ""),
+                        success=True,
+                    )
 
                 task_log.info(
                     "task.complete",
@@ -373,6 +404,14 @@ class TaskRuntime:
                         details={"error": error_str, "retry_info": retry_decision.reason},
                     )
                     self.notification_manager.stop_task_tracking(task.id)
+
+                # Finalize stream with failure
+                if self.stream_manager:
+                    await self.stream_manager.finalize_stream(
+                        task_id=task.id,
+                        final_content=f"\n:x: Error: {error_str[:200]}",
+                        success=False,
+                    )
 
                 # Final failure - no more retries
                 self.task_queue.mark_failed(task.id, error_str)
