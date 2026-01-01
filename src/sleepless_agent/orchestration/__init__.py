@@ -7,6 +7,14 @@ from sleepless_agent.orchestration.project_config import (
     load_projects_from_config,
     validate_project_config,
 )
+from sleepless_agent.orchestration.orchestrator import ProjectOrchestrator
+from sleepless_agent.orchestration.signals import (
+    WorkItem,
+    SignalSource,
+    SignalType,
+)
+from sleepless_agent.orchestration.local_collector import LocalSignalCollector
+from sleepless_agent.orchestration.task_generator import ProjectTaskGenerator
 
 __all__ = [
     "ProjectConfig",
@@ -14,4 +22,10 @@ __all__ = [
     "ProjectGoal",
     "load_projects_from_config",
     "validate_project_config",
+    "ProjectOrchestrator",
+    "WorkItem",
+    "SignalSource",
+    "SignalType",
+    "LocalSignalCollector",
+    "ProjectTaskGenerator",
 ]

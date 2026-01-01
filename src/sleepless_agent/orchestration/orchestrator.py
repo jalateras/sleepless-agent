@@ -15,6 +15,8 @@ from sleepless_agent.orchestration.project_config import (
     ProjectConfig,
     load_projects_from_config,
 )
+from sleepless_agent.orchestration.local_collector import LocalSignalCollector
+from sleepless_agent.orchestration.task_generator import ProjectTaskGenerator
 
 logger = get_logger(__name__)
 
@@ -179,22 +181,48 @@ class ProjectOrchestrator:
             has_github=project.has_github,
         )
 
-        # TODO: Implement actual signal collection
-        # This will be done in future iterations:
-        # - Scan for TODO/FIXME comments
-        # - Check test failures
-        # - Analyze coverage gaps
-        # - Fetch GitHub issues/PRs
-        # - Check CI status
+        tasks_created = 0
 
-        # For now, just log that we're checking
+        # Collect local signals
+        collector = LocalSignalCollector(project)
+        signals = collector.collect_all()
+
+        if not signals:
+            logger.debug(
+                "orchestrator.no_signals",
+                project_id=project.id,
+            )
+            return 0
+
+        # Generate tasks from signals
+        generator = ProjectTaskGenerator(project)
+        task_descriptions = generator.generate_tasks(signals)
+
+        # Submit tasks to queue
+        for description in task_descriptions:
+            try:
+                self.task_queue.add_task(
+                    description=description,
+                    priority=self.default_priority,
+                    project_id=project.id,
+                    project_name=project.name,
+                )
+                tasks_created += 1
+            except Exception as e:
+                logger.error(
+                    "orchestrator.task_creation_failed",
+                    project_id=project.id,
+                    error=str(e),
+                )
+
         logger.info(
-            "orchestrator.project_checked",
+            "orchestrator.project_complete",
             project_id=project.id,
-            goals_count=len(project.goals),
+            signals_collected=len(signals),
+            tasks_created=tasks_created,
         )
 
-        return 0
+        return tasks_created
 
     def get_project_health(self, project_id: str) -> Dict[str, any]:
         """Get health status for a specific project.
