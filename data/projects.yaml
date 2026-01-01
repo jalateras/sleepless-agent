@@ -1,0 +1,6 @@
+# Project Orchestrator Configuration
+# Copy from data/projects.example.yaml and customize
+
+version: "1.0"
+
+projects: []

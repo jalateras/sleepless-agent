@@ -31,6 +31,7 @@ from sleepless_agent.interfaces.bot import SlackBot
 from sleepless_agent.monitoring.logging import get_logger
 from sleepless_agent.monitoring.monitor import HealthMonitor, PerformanceLogger
 from sleepless_agent.monitoring.report_generator import ReportGenerator
+from sleepless_agent.orchestration.orchestrator import ProjectOrchestrator
 
 logger = get_logger(__name__)
 
@@ -210,6 +211,20 @@ class SleeplessAgent:
             stream_manager=self.stream_manager,
         )
 
+        # Initialize project orchestrator for multi-project management
+        projects_config_path = Path(self.config.agent.db_path).parent / "projects.yaml"
+        self.project_orchestrator = ProjectOrchestrator(
+            config_path=projects_config_path,
+            task_queue=self.task_queue,
+            default_priority=TaskPriority.THOUGHT,
+            check_interval_seconds=300,  # 5 minutes
+        )
+        logger.info(
+            "orchestrator.ready",
+            config_path=str(projects_config_path),
+            projects_count=len(self.project_orchestrator.get_all_projects()),
+        )
+
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
@@ -291,6 +306,17 @@ class SleeplessAgent:
                         await self.auto_generator.check_and_generate()
                     except Exception as exc:
                         logger.error(f"Error in auto-generation: {exc}")
+
+                    try:
+                        analysis_results = await self.project_orchestrator.analyze_all_projects()
+                        if analysis_results:
+                            logger.info(
+                                "orchestrator.analysis_complete",
+                                projects_checked=len(analysis_results),
+                                tasks_generated=sum(analysis_results.values()),
+                            )
+                    except Exception as exc:
+                        logger.error(f"Error in project analysis: {exc}")
 
                 health_check_counter += 1
                 if health_check_counter >= 12:

@@ -1,0 +1,89 @@
+# Project Orchestrator Configuration
+#
+# This file defines projects that the sleepless-agent will monitor and
+# generate tasks for. Each project can have:
+# - A local workspace path
+# - Optional GitHub integration
+# - Goals that guide task generation
+# - Constraints on what work should NOT be done
+#
+# Copy this file to data/projects.yaml and customize for your projects.
+
+version: "1.0"
+
+projects:
+  # Example 1: Full-featured project with GitHub integration
+  # - id: sleepless-agent
+  #   name: "Sleepless Agent"
+  #   local_path: /Users/jima/workspace/sleepless-agent
+  #   github:
+  #     repo: jalateras/sleepless-agent
+  #     default_branch: main
+  #     sync_mode: pull  # pull | push | bidirectional
+  #     check_dependencies: true
+  #   goals:
+  #     - type: coverage
+  #       target: 80
+  #       current: 65
+  #       metric: "line_coverage"
+  #     - type: documentation
+  #       areas: ["README", "API", "examples"]
+  #     - type: performance
+  #       metric: "startup_time"
+  #       target_ms: 500
+  #   constraints:
+  #     - "No breaking changes to config.yaml"
+  #     - "Maintain Python 3.11+ compatibility"
+  #   check_interval_hours: 4
+  #   priority: high
+  #   enabled: true
+
+  # Example 2: GitHub-only project (auto-cloned to managed workspace)
+  # - id: oss-library
+  #   name: "Open Source Library"
+  #   local_path: null  # Auto-managed by orchestrator
+  #   github:
+  #     repo: user/oss-library
+  #     default_branch: main
+  #     sync_mode: bidirectional
+  #   goals:
+  #     - type: coverage
+  #       target: 90
+  #     - type: feature
+  #       description: "Add async support"
+  #   check_interval_hours: 8
+  #   priority: medium
+  #   enabled: true
+
+  # Example 3: Local-only project (no GitHub integration)
+  # - id: side-project
+  #   name: "Side Project"
+  #   local_path: /Users/jima/projects/side-project
+  #   goals:
+  #     - type: feature
+  #       description: "MVP implementation"
+  #     - type: testing
+  #       description: "Add comprehensive tests"
+  #   check_interval_hours: 24
+  #   priority: low
+  #   enabled: true
+
+# Notes:
+#
+# Project Goal Types:
+# - coverage: Target code coverage percentage
+# - documentation: Improve documentation in specified areas
+# - performance: Improve performance metric
+# - feature: Implement a specific feature
+# - testing: Add or improve tests
+#
+# Priority Levels:
+# - low: Background work, only when idle
+# - medium: Standard priority
+# - high: Important project, check frequently
+# - urgent: Critical project, prioritize above all else
+#
+# Sync Modes:
+# - pull: Pull changes from GitHub before analysis
+# - push: Push local commits to GitHub after task completion
+# - bidirectional: Both pull and push
