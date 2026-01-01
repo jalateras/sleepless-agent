@@ -432,11 +432,32 @@ class TaskRuntime:
 
         Updates the attempt count, notifies the user, waits for the backoff
         period, then re-executes the task.
+
+        For substantive failures, the task description is refined to include
+        error context and guidance to try a different approach.
         """
         from sleepless_agent.core.retry import RetryDecision
+        from sleepless_agent.storage.feedback import classify_failure, FailureType
 
         # Increment attempt count in the database
         self.task_queue.increment_attempt_count(task.id)
+
+        # For substantive failures, refine the prompt with error context
+        failure_type = classify_failure(error)
+        if failure_type == FailureType.SUBSTANTIVE:
+            refined_description = self._refine_prompt_with_error(
+                task.description,
+                error,
+                retry_decision.next_attempt,
+            )
+            if refined_description != task.description:
+                self.task_queue.update_task_description(task.id, refined_description)
+                task_log.info(
+                    "task.retry.prompt_refined",
+                    failure_type="substantive",
+                    original_len=len(task.description),
+                    refined_len=len(refined_description),
+                )
 
         # Log the retry
         task_log.warning(
@@ -480,6 +501,48 @@ class TaskRuntime:
 
         # Re-execute the task (this will call execute() again with updated attempt_count)
         await self.execute(refreshed_task)
+
+    def _refine_prompt_with_error(
+        self,
+        description: str,
+        error: str,
+        attempt: int,
+    ) -> str:
+        """Refine task description with error context for substantive failure retry.
+
+        Appends error context and guidance to try a different approach. This helps
+        Claude Code learn from the failure and attempt an alternative solution.
+
+        Args:
+            description: Original task description
+            error: Error message from the failed attempt
+            attempt: The upcoming attempt number
+
+        Returns:
+            Refined description with error context appended
+        """
+        # Don't refine if we've already refined (check for our marker)
+        refinement_marker = "\n\n---\n[Previous attempt"
+        if refinement_marker in description:
+            # Already refined - update the error info
+            base_description = description.split(refinement_marker)[0]
+        else:
+            base_description = description
+
+        # Truncate error to reasonable length
+        error_summary = error[:500].strip()
+        if len(error) > 500:
+            error_summary += "..."
+
+        # Build the refinement suffix
+        refinement = (
+            f"\n\n---\n[Previous attempt {attempt - 1} failed]\n"
+            f"Error: {error_summary}\n\n"
+            f"Please try a different approach to solve this task. "
+            f"Consider what went wrong and adjust your strategy accordingly."
+        )
+
+        return base_description + refinement
 
     def _maybe_commit_changes(
         self,

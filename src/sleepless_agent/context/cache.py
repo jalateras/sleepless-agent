@@ -31,7 +31,7 @@ class ContextCache:
     and git history to avoid repeated computation within a time window.
     """
 
-    def __init__(self, default_ttl: timedelta = timedelta(minutes=5)):
+    def __init__(self, default_ttl: timedelta = timedelta(minutes=60)):
         """Initialize the context cache.
 
         Args:
@@ -217,7 +217,7 @@ def get_context_cache(ttl: Optional[timedelta] = None) -> ContextCache:
     """
     global _global_cache
     if _global_cache is None:
-        _global_cache = ContextCache(default_ttl=ttl or timedelta(minutes=5))
+        _global_cache = ContextCache(default_ttl=ttl or timedelta(minutes=60))
     return _global_cache
 
 

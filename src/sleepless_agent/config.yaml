@@ -67,7 +67,7 @@ templates:
 # Codebase context injection for task prompts
 context:
   enabled: true
-  cache_ttl_minutes: 5  # How long to cache extracted context
+  cache_ttl_minutes: 60  # How long to cache extracted context (1 hour)
   structure:
     enabled: true
     max_depth: 4  # Maximum directory depth to traverse

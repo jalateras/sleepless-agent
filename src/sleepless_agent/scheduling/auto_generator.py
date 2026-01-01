@@ -26,6 +26,7 @@ from sleepless_agent.core.models import Task, TaskPriority, TaskStatus, TaskType
 from typing import TypeAlias
 
 from sleepless_agent.scheduling.scheduler import BudgetManager
+from sleepless_agent.storage.feedback import FeedbackStore
 from sleepless_agent.utils.config import ConfigNode
 
 AutoGenerationConfig: TypeAlias = ConfigNode
@@ -46,6 +47,7 @@ class AutoTaskGenerator:
         threshold_night: float,
         night_start_hour: int = 20,
         night_end_hour: int = 8,
+        feedback_store: Optional[FeedbackStore] = None,
     ):
         """Initialize auto-generator with database session and config"""
         self.session = db_session
@@ -57,6 +59,7 @@ class AutoTaskGenerator:
         self.threshold_night = threshold_night
         self.night_start_hour = night_start_hour
         self.night_end_hour = night_end_hour
+        self.feedback_store = feedback_store
 
         # Validate prompt weights sum to approximately 1.0
         if self.config.prompts:
@@ -67,6 +70,10 @@ class AutoTaskGenerator:
         # Track generation metadata
         self.last_generation_time: Optional[datetime] = None
         self._last_generation_source: Optional[str] = None
+
+        # Cache for feedback weights (refreshed periodically)
+        self._feedback_weights: dict[str, float] = {}
+        self._feedback_weights_updated: Optional[datetime] = None
 
     async def check_and_generate(self) -> bool:
         """Check if conditions are met and generate a task if possible"""
@@ -306,6 +313,19 @@ class AutoTaskGenerator:
         if not task_desc:
             return None
 
+        # Check if generated task matches a suppressed failure pattern
+        if self.feedback_store:
+            try:
+                if self.feedback_store.is_pattern_suppressed(task_desc):
+                    logger.info(
+                        "autogen.task.suppressed",
+                        reason="matches_failure_pattern",
+                        preview=task_desc[:80],
+                    )
+                    return None
+            except Exception as e:
+                logger.warning("autogen.pattern_check.failed", error=str(e))
+
         # Parse REFINE target task ID if present
         parsed_desc, refines_task_id = self._parse_refine_target(task_desc)
 
@@ -353,10 +373,36 @@ class AutoTaskGenerator:
 
         return task
 
+    def _refresh_feedback_weights(self) -> None:
+        """Refresh feedback weights from store if stale (older than 10 minutes)."""
+        if not self.feedback_store:
+            return
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if (
+            self._feedback_weights_updated
+            and (now - self._feedback_weights_updated).total_seconds() < 600
+        ):
+            return  # Cache is fresh
+
+        try:
+            self._feedback_weights = self.feedback_store.get_feedback_weights_by_source()
+            self._feedback_weights_updated = now
+            if self._feedback_weights:
+                logger.debug(
+                    "autogen.feedback_weights.refreshed",
+                    weights=self._feedback_weights,
+                )
+        except Exception as e:
+            logger.warning("autogen.feedback_weights.refresh_failed", error=str(e))
+
     def _select_prompt(self, context: dict) -> Optional[AutoTaskPromptConfig]:
-        """Select a prompt configuration based on generation mode and configured weights."""
+        """Select a prompt configuration based on generation mode, feedback weights, and configured weights."""
         prompts = self.config.prompts or []
         logger.debug("autogen.select_prompt", prompt_count=len(prompts), mode=context['mode'])
+
+        # Refresh feedback weights
+        self._refresh_feedback_weights()
 
         mode = context['mode']
 
@@ -371,10 +417,26 @@ class AutoTaskGenerator:
         weighted_list: list[AutoTaskPromptConfig] = []
 
         for prompt in mode_prompts:
-            weight = max(int(prompt.weight * 10 or 0), 0)  # Scale by 10 for decimal weights
-            if weight <= 0:
+            base_weight = float(prompt.weight or 0)
+            if base_weight <= 0:
                 continue
-            weighted_list.extend([prompt] * weight)
+
+            # Apply feedback multiplier if available
+            feedback_multiplier = self._feedback_weights.get(prompt.name, 1.0)
+            adjusted_weight = base_weight * feedback_multiplier
+
+            # Scale by 10 and ensure at least 1 entry for positive weights
+            entries = max(int(adjusted_weight * 10), 1) if adjusted_weight > 0 else 0
+            weighted_list.extend([prompt] * entries)
+
+            if feedback_multiplier != 1.0:
+                logger.debug(
+                    "autogen.weight_adjusted",
+                    prompt=prompt.name,
+                    base=base_weight,
+                    multiplier=feedback_multiplier,
+                    adjusted=adjusted_weight,
+                )
 
         if not weighted_list:
             logger.warning("autogen.no_prompts_available", configured_prompts=len(prompts))

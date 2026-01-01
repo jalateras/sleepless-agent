@@ -129,7 +129,7 @@ class ContextExtractor:
         self,
         root_path: Path,
         cache: Optional[ContextCache] = None,
-        cache_ttl: timedelta = timedelta(minutes=5),
+        cache_ttl: timedelta = timedelta(minutes=60),
         max_depth: int = 4,
     ):
         """Initialize the context extractor.

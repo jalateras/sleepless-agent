@@ -168,6 +168,28 @@ class TaskQueue(SQLiteStore):
             logger.debug(f"Task {task_id} attempt count incremented to {task.attempt_count}")
         return task
 
+    def update_task_description(self, task_id: int, description: str) -> Optional[Task]:
+        """Update the task description (used for prompt refinement on retry).
+
+        Args:
+            task_id: ID of the task to update
+            description: New description text
+
+        Returns:
+            Updated task or None if not found
+        """
+
+        def _op(session: Session) -> Optional[Task]:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if task:
+                task.description = description
+            return task
+
+        task = self._run_write(_op)
+        if task:
+            logger.debug(f"Task {task_id} description updated ({len(description)} chars)")
+        return task
+
     def cancel_task(self, task_id: int) -> Optional[Task]:
         """Cancel pending task (soft delete)"""
 
