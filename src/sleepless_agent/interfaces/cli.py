@@ -1123,6 +1123,33 @@ def build_parser() -> argparse.ArgumentParser:
     trash_parser.add_argument("subcommand", nargs="?", default="list", help="list (default) | restore | empty")
     trash_parser.add_argument("identifier", nargs="?", help="Project ID or name (for restore)")
 
+    # Orchestrator commands
+    orch_parser = subparsers.add_parser("orchestrator", help="Project orchestrator management")
+    orch_subparsers = orch_parser.add_subparsers(dest="orchestrator_command", required=True)
+
+    # orchestrator status
+    orch_status_parser = orch_subparsers.add_parser("status", help="Show project configuration and status")
+    orch_status_parser.add_argument("-p", "--project", help="Filter to specific project ID")
+    orch_status_parser.add_argument("--config", help="Path to projects.yaml (default: ~/.sleepless-agent/data/projects.yaml)")
+    orch_status_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # orchestrator goals
+    orch_goals_parser = orch_subparsers.add_parser("goals", help="Show project goals and targets")
+    orch_goals_parser.add_argument("-p", "--project", help="Filter to specific project ID")
+    orch_goals_parser.add_argument("--config", help="Path to projects.yaml (default: ~/.sleepless-agent/data/projects.yaml)")
+    orch_goals_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # orchestrator health
+    orch_health_parser = orch_subparsers.add_parser("health", help="Show project health metrics")
+    orch_health_parser.add_argument("-p", "--project", help="Filter to specific project ID")
+    orch_health_parser.add_argument("--config", help="Path to projects.yaml (default: ~/.sleepless-agent/data/projects.yaml)")
+    orch_health_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # orchestrator validate
+    orch_validate_parser = orch_subparsers.add_parser("validate", help="Validate project configuration")
+    orch_validate_parser.add_argument("-p", "--project", help="Filter to specific project ID")
+    orch_validate_parser.add_argument("--config", help="Path to projects.yaml (default: ~/.sleepless-agent/data/projects.yaml)")
+
     return parser
 
 
@@ -1161,8 +1188,221 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "trash":
         return command_trash(ctx, args.subcommand, args.identifier)
 
+    if args.command == "orchestrator":
+        return command_orchestrator(args)
+
     parser.error(f"Unknown command: {args.command}")
     return 1
+
+
+def command_orchestrator(args: argparse.Namespace) -> int:
+    """Handle orchestrator subcommands."""
+    from sleepless_agent.orchestration.project_config import load_projects_from_config
+
+    # Determine config path
+    if hasattr(args, 'config') and args.config:
+        config_path = Path(args.config).expanduser()
+    else:
+        config_path = Path.home() / ".sleepless-agent" / "data" / "projects.yaml"
+
+    # Load projects
+    try:
+        projects = load_projects_from_config(config_path)
+    except FileNotFoundError:
+        print(f"[yellow]Configuration file not found: {config_path}[/yellow]")
+        print("Create a projects.yaml file or run: sle orchestrator init")
+        return 1
+    except Exception as e:
+        print(f"[red]Error loading config: {e}[/red]")
+        return 1
+
+    # Filter by project if specified
+    project_filter = getattr(args, 'project', None)
+    if project_filter:
+        projects = [p for p in projects if p.id == project_filter]
+        if not projects:
+            print(f"[red]Project '{project_filter}' not found[/red]")
+            return 1
+
+    console = Console()
+
+    if args.orchestrator_command == "status":
+        return _orchestrator_status(projects, args, console)
+    elif args.orchestrator_command == "goals":
+        return _orchestrator_goals(projects, args, console)
+    elif args.orchestrator_command == "health":
+        return _orchestrator_health(projects, args, console)
+    elif args.orchestrator_command == "validate":
+        return _orchestrator_validate(projects, console)
+    else:
+        print(f"[red]Unknown orchestrator command: {args.orchestrator_command}[/red]")
+        return 1
+
+
+def _orchestrator_status(projects, args, console) -> int:
+    """Show project status."""
+    if getattr(args, 'json', False):
+        data = []
+        for p in projects:
+            data.append({
+                "id": p.id,
+                "name": p.name,
+                "enabled": p.enabled,
+                "priority": p.priority,
+                "priority_weight": p.priority_weight,
+                "check_interval_hours": p.check_interval_hours,
+                "has_github": p.has_github,
+                "goal_count": len(p.goals),
+                "constraint_count": len(p.constraints),
+            })
+        import json
+        print(json.dumps(data, indent=2))
+    else:
+        table = Table(title="Project Status")
+        table.add_column("ID", style="cyan")
+        table.add_column("Name", style="white")
+        table.add_column("Enabled", style="green")
+        table.add_column("Priority", style="yellow")
+        table.add_column("Weight", style="blue")
+        table.add_column("GitHub", style="magenta")
+        table.add_column("Goals", style="white")
+        table.add_column("Constraints", style="white")
+
+        for p in projects:
+            table.add_row(
+                p.id,
+                p.name,
+                "[green]✓[/green]" if p.enabled else "[red]✗[/red]",
+                p.priority,
+                str(p.priority_weight),
+                "[green]✓[/green]" if p.has_github else "[red]✗[/red]",
+                str(len(p.goals)),
+                str(len(p.constraints)),
+            )
+
+        console.print(table)
+    return 0
+
+
+def _orchestrator_goals(projects, args, console) -> int:
+    """Show project goals."""
+    if getattr(args, 'json', False):
+        data = []
+        for p in projects:
+            for goal in p.goals:
+                data.append({
+                    "project_id": p.id,
+                    "project_name": p.name,
+                    "type": goal.type,
+                    "metric": goal.metric,
+                    "target": goal.target,
+                    "description": goal.description,
+                    "keywords": goal.keywords or [],
+                })
+        import json
+        print(json.dumps(data, indent=2))
+    else:
+        for p in projects:
+            if not p.goals:
+                console.print(f"[dim]No goals configured for {p.name}[/dim]")
+                continue
+
+            console.print(f"\n[bold cyan]{p.name} ({p.id})[/bold cyan]")
+
+            table = Table()
+            table.add_column("Type", style="green")
+            table.add_column("Metric", style="blue")
+            table.add_column("Target", style="yellow")
+            table.add_column("Description", style="white")
+            table.add_column("Keywords", style="dim")
+
+            for goal in p.goals:
+                table.add_row(
+                    goal.type,
+                    goal.metric or "N/A",
+                    str(goal.target),
+                    goal.description or "",
+                    ", ".join(goal.keywords or []),
+                )
+
+            console.print(table)
+    return 0
+
+
+def _orchestrator_health(projects, args, console) -> int:
+    """Show project health (placeholder - requires running orchestrator)."""
+    console.print("[yellow]Project health requires the orchestrator to be running.[/yellow]")
+    console.print("\n[bold]Project Summary:[/bold]")
+
+    table = Table()
+    table.add_column("Project", style="cyan")
+    table.add_column("Status", style="white")
+    table.add_column("Goals", style="yellow")
+    table.add_column("Constraints", style="magenta")
+
+    for p in projects:
+        table.add_row(
+            p.name,
+            "[green]Enabled[/green]" if p.enabled else "[dim]Disabled[/dim]",
+            str(len(p.goals)),
+            str(len(p.constraints)),
+        )
+
+    console.print(table)
+    console.print("\n[dim]Health metrics are calculated during orchestrator runs.[/dim]")
+    return 0
+
+
+def _orchestrator_validate(projects, console) -> int:
+    """Validate project configuration."""
+    errors_found = False
+
+    for p in projects:
+        console.print(f"\n[bold cyan]Validating {p.name} ({p.id})[/bold cyan]")
+
+        errors = []
+        warnings = []
+
+        # Check required fields
+        if not p.local_path:
+            errors.append("Missing local_path")
+
+        # Check if local path exists
+        if p.local_path:
+            local = Path(p.local_path).expanduser()
+            if not local.exists():
+                warnings.append(f"Local path does not exist: {local}")
+
+        # Check GitHub config
+        if p.github:
+            if not p.github.repo:
+                errors.append("GitHub configured but missing repo")
+            else:
+                if "/" not in p.github.repo:
+                    errors.append(f"Invalid GitHub repo format: {p.github.repo}")
+
+        # Check goals
+        for goal in p.goals:
+            if not goal.type:
+                errors.append("Goal missing type")
+            if goal.target is None:
+                warnings.append(f"Goal '{goal.type}' has no target")
+
+        # Display results
+        if errors:
+            errors_found = True
+            console.print(f"  [red]Errors ({len(errors)}):[/red]")
+            for error in errors:
+                console.print(f"    [red]✗ {error}[/red]")
+        else:
+            console.print(f"  [green]No errors found[/green]")
+
+        if warnings:
+            console.print(f"  [yellow]Warnings ({len(warnings)}):[/yellow]")
+            for warning in warnings:
+                console.print(f"    [yellow]⚠ {warning}[/yellow]")
+
+    return 1 if errors_found else 0
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution
