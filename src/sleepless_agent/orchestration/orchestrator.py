@@ -18,6 +18,11 @@ from sleepless_agent.orchestration.project_config import (
 from sleepless_agent.orchestration.local_collector import LocalSignalCollector
 from sleepless_agent.orchestration.github_collector import GitHubSignalCollector
 from sleepless_agent.orchestration.task_generator import ProjectTaskGenerator
+from sleepless_agent.orchestration.prioritization import (
+    CrossProjectPrioritizer,
+    ProjectHealth,
+    RankedTask,
+)
 
 logger = get_logger(__name__)
 
@@ -57,6 +62,12 @@ class ProjectOrchestrator:
         # Project registry
         self._projects: Dict[str, ProjectConfig] = {}
         self._last_check_time: Dict[str, datetime] = {}
+
+        # Cross-project prioritization
+        self.prioritizer = CrossProjectPrioritizer()
+
+        # Signals cache for health tracking
+        self._signals_cache: Dict[str, List] = {}
 
         # Load initial configuration
         self._load_projects()
@@ -141,59 +152,100 @@ class ProjectOrchestrator:
         It will:
         1. Identify projects due for analysis
         2. Collect signals from each project (local + GitHub)
-        3. Generate tasks based on signals and goals
-        4. Submit tasks to the task queue
+        3. Prioritize signals across all projects using goals and health
+        4. Submit top-ranked tasks to the task queue
 
         Returns:
             Dictionary with project_id -> tasks_generated count
         """
-        results = {}
+        # Step 1: Collect signals from all due projects
+        all_signals: Dict[str, List] = {}
+        projects_to_check = []
 
         for project in self.get_enabled_projects():
             if not self.should_check_project(project):
                 continue
 
+            projects_to_check.append(project)
+
             try:
-                tasks_created = await self._analyze_project(project)
-                results[project.id] = tasks_created
+                signals = await self._collect_project_signals(project)
+                all_signals[project.id] = signals
                 self._last_check_time[project.id] = datetime.now(timezone.utc)
+                self._signals_cache[project.id] = signals
             except Exception as e:
                 logger.error(
-                    "orchestrator.project_analysis_failed",
+                    "orchestrator.project_collection_failed",
                     project_id=project.id,
                     error=str(e),
                 )
-                results[project.id] = 0
+                all_signals[project.id] = []
+
+        # Step 2: Prioritize across all projects
+        ranked_tasks = self.prioritizer.prioritize_signals(
+            all_signals,
+            self._projects,
+        )
+
+        # Step 3: Submit top tasks (limit to prevent overwhelming)
+        results = {p.id: 0 for p in projects_to_check}
+        max_tasks = 10  # Limit total tasks per cycle
+
+        for ranked_task in ranked_tasks[:max_tasks]:
+            try:
+                # Map priority tier to TaskPriority
+                task_priority = self._tier_to_priority(ranked_task.priority_tier)
+
+                self.task_queue.add_task(
+                    description=ranked_task.description,
+                    priority=task_priority,
+                    project_id=ranked_task.project_id,
+                    project_name=ranked_task.project_name,
+                )
+                results[ranked_task.project_id] += 1
+            except Exception as e:
+                logger.error(
+                    "orchestrator.task_creation_failed",
+                    project_id=ranked_task.project_id,
+                    error=str(e),
+                )
+
+        logger.info(
+            "orchestrator.analysis_complete",
+            projects_checked=len(projects_to_check),
+            total_signals=sum(len(s) for s in all_signals.values()),
+            ranked_tasks=len(ranked_tasks),
+            tasks_submitted=sum(results.values()),
+        )
 
         return results
 
-    async def _analyze_project(self, project: ProjectConfig) -> int:
-        """Analyze a single project and generate tasks.
+    async def _collect_project_signals(self, project: ProjectConfig) -> List:
+        """Collect all signals for a project.
 
         Args:
             project: Project configuration
 
         Returns:
-            Number of tasks generated
+            List of WorkItems
         """
         logger.debug(
-            "orchestrator.analyzing_project",
+            "orchestrator.collecting_signals",
             project_id=project.id,
             has_github=project.has_github,
         )
 
-        tasks_created = 0
+        signals = []
 
         # Collect local signals
         collector = LocalSignalCollector(project)
-        signals = collector.collect_all()
+        signals.extend(collector.collect_all())
 
         # Collect GitHub signals if configured
         if project.has_github:
             try:
                 github_collector = GitHubSignalCollector(project)
-                github_signals = github_collector.collect_all()
-                signals.extend(github_signals)
+                signals.extend(github_collector.collect_all())
             except Exception as e:
                 logger.error(
                     "orchestrator.github_collection_failed",
@@ -201,42 +253,26 @@ class ProjectOrchestrator:
                     error=str(e),
                 )
 
-        if not signals:
-            logger.debug(
-                "orchestrator.no_signals",
-                project_id=project.id,
-            )
-            return 0
+        return signals
 
-        # Generate tasks from signals
-        generator = ProjectTaskGenerator(project)
-        task_descriptions = generator.generate_tasks(signals)
+    def _tier_to_priority(self, tier) -> TaskPriority:
+        """Convert priority tier to TaskPriority enum.
 
-        # Submit tasks to queue
-        for description in task_descriptions:
-            try:
-                self.task_queue.add_task(
-                    description=description,
-                    priority=self.default_priority,
-                    project_id=project.id,
-                    project_name=project.name,
-                )
-                tasks_created += 1
-            except Exception as e:
-                logger.error(
-                    "orchestrator.task_creation_failed",
-                    project_id=project.id,
-                    error=str(e),
-                )
+        Args:
+            tier: PriorityTier enum
 
-        logger.info(
-            "orchestrator.project_complete",
-            project_id=project.id,
-            signals_collected=len(signals),
-            tasks_created=tasks_created,
-        )
+        Returns:
+            TaskPriority enum value
+        """
+        from sleepless_agent.orchestration.prioritization import PriorityTier
 
-        return tasks_created
+        tier_mapping = {
+            PriorityTier.CRITICAL: TaskPriority.HIGH,
+            PriorityTier.HIGH: TaskPriority.HIGH,
+            PriorityTier.MEDIUM: TaskPriority.THOUGHT,
+            PriorityTier.LOW: TaskPriority.LOW,
+        }
+        return tier_mapping.get(tier, TaskPriority.THOUGHT)
 
     def get_project_health(self, project_id: str) -> Dict[str, any]:
         """Get health status for a specific project.
@@ -251,20 +287,30 @@ class ProjectOrchestrator:
         if not project:
             return {"status": "unknown", "error": "Project not found"}
 
-        # TODO: Implement actual health reporting
-        # This will be done in future iterations:
-        # - Goal progress tracking
-        # - Recent activity summary
-        # - Active signals count
-        # - Overall health status
+        # Get health from prioritizer cache
+        health = self.prioritizer.get_project_health(project_id)
+
+        if not health:
+            return {
+                "status": "unknown",
+                "project_id": project.id,
+                "name": project.name,
+                "priority": project.priority,
+                "goals": [{"type": g.type, "target": g.target} for g in project.goals],
+                "last_check": self._last_check_time.get(project_id),
+            }
 
         return {
-            "status": "healthy",
+            "status": health.health_tier,
             "project_id": project.id,
             "name": project.name,
             "priority": project.priority,
-            "goals": [{"type": g.type, "target": g.target} for g in project.goals],
-            "last_check": self._last_check_time.get(project.id),
+            "overall_health": health.overall_health,
+            "signal_health": health.signal_health,
+            "goal_progress": health.goal_progress,
+            "issues_count": health.issues_count,
+            "stale_count": health.stale_count,
+            "last_check": health.last_check or self._last_check_time.get(project_id),
         }
 
     def get_all_project_health(self) -> List[Dict[str, any]]:
@@ -273,5 +319,13 @@ class ProjectOrchestrator:
         Returns:
             List of health dictionaries, sorted by priority
         """
-        projects = self.get_enabled_projects()
-        return [self.get_project_health(p.id) for p in projects]
+        health_data = []
+
+        for project in self.get_enabled_projects():
+            health_info = self.get_project_health(project.id)
+            health_data.append(health_info)
+
+        # Sort by overall health (poorest first)
+        health_data.sort(key=lambda h: h.get("overall_health", 1.0))
+
+        return health_data

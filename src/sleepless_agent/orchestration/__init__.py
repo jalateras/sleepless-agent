@@ -16,6 +16,15 @@ from sleepless_agent.orchestration.signals import (
 from sleepless_agent.orchestration.local_collector import LocalSignalCollector
 from sleepless_agent.orchestration.github_collector import GitHubSignalCollector
 from sleepless_agent.orchestration.task_generator import ProjectTaskGenerator
+from sleepless_agent.orchestration.prioritization import (
+    CrossProjectPrioritizer,
+    GoalAlignmentScorer,
+    ConstraintValidator,
+    ProjectHealthCalculator,
+    ProjectHealth,
+    RankedTask,
+    PriorityTier,
+)
 
 __all__ = [
     "ProjectConfig",
@@ -30,4 +39,11 @@ __all__ = [
     "LocalSignalCollector",
     "GitHubSignalCollector",
     "ProjectTaskGenerator",
+    "CrossProjectPrioritizer",
+    "GoalAlignmentScorer",
+    "ConstraintValidator",
+    "ProjectHealthCalculator",
+    "ProjectHealth",
+    "RankedTask",
+    "PriorityTier",
 ]
