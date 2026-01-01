@@ -14,6 +14,7 @@ from sleepless_agent.orchestration.signals import (
     SignalType,
 )
 from sleepless_agent.orchestration.local_collector import LocalSignalCollector
+from sleepless_agent.orchestration.github_collector import GitHubSignalCollector
 from sleepless_agent.orchestration.task_generator import ProjectTaskGenerator
 
 __all__ = [
@@ -27,5 +28,6 @@ __all__ = [
     "SignalSource",
     "SignalType",
     "LocalSignalCollector",
+    "GitHubSignalCollector",
     "ProjectTaskGenerator",
 ]

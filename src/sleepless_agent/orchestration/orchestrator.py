@@ -16,6 +16,7 @@ from sleepless_agent.orchestration.project_config import (
     load_projects_from_config,
 )
 from sleepless_agent.orchestration.local_collector import LocalSignalCollector
+from sleepless_agent.orchestration.github_collector import GitHubSignalCollector
 from sleepless_agent.orchestration.task_generator import ProjectTaskGenerator
 
 logger = get_logger(__name__)
@@ -186,6 +187,19 @@ class ProjectOrchestrator:
         # Collect local signals
         collector = LocalSignalCollector(project)
         signals = collector.collect_all()
+
+        # Collect GitHub signals if configured
+        if project.has_github:
+            try:
+                github_collector = GitHubSignalCollector(project)
+                github_signals = github_collector.collect_all()
+                signals.extend(github_signals)
+            except Exception as e:
+                logger.error(
+                    "orchestrator.github_collection_failed",
+                    project_id=project.id,
+                    error=str(e),
+                )
 
         if not signals:
             logger.debug(
