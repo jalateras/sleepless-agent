@@ -12,10 +12,12 @@ from sqlalchemy.orm import sessionmaker
 
 from sleepless_agent.utils.config import get_config
 from sleepless_agent.storage.results import ResultManager
+from sleepless_agent.storage.feedback import FeedbackStore
 from sleepless_agent.scheduling.auto_generator import AutoTaskGenerator
 from sleepless_agent.scheduling.scheduler import BudgetManager, SmartScheduler
 from sleepless_agent.core.models import TaskPriority, init_db
 from sleepless_agent.core.queue import TaskQueue
+from sleepless_agent.core.retry import RetryConfig
 from sleepless_agent.core.task_runtime import TaskRuntime
 from sleepless_agent.core.timeout_manager import TaskTimeoutManager
 from sleepless_agent.core.executor import ClaudeCodeExecutor
@@ -99,6 +101,13 @@ class SleeplessAgent:
             str(self.config.agent.results_path),
         )
 
+        # Initialize feedback store for learning from task outcomes
+        self.feedback_store = FeedbackStore(str(self.config.agent.db_path))
+
+        # Load retry configuration from config.yaml
+        retry_config_dict = getattr(self.config, 'retry', {}) or {}
+        self.retry_config = RetryConfig.from_dict(retry_config_dict) if retry_config_dict else RetryConfig()
+
         auto_create_repo = git_config.get("auto_create_repo", False) if git_config else False
         git_enabled = git_config.get("enabled", True) if git_config else True
         self.git = GitManager(
@@ -134,6 +143,7 @@ class SleeplessAgent:
             report_generator=self.report_generator,
             live_status_tracker=self.live_status_tracker,
             workspace_root=str(self.config.agent.workspace_root),
+            feedback_store=self.feedback_store,
         )
 
         self.timeout_manager = TaskTimeoutManager(
@@ -159,6 +169,8 @@ class SleeplessAgent:
             report_generator=self.report_generator,
             bot=self.bot,
             live_status_tracker=self.live_status_tracker,
+            feedback_store=self.feedback_store,
+            retry_config=self.retry_config,
         )
 
         signal.signal(signal.SIGINT, self._signal_handler)

@@ -17,6 +17,13 @@ agent:
   workspace_root: ./workspace
   task_timeout_seconds: 1800
 
+retry:
+  max_attempts: 3  # Maximum total attempts (including first execution)
+  base_delay_seconds: 30.0  # Initial delay before first retry
+  max_delay_seconds: 3600.0  # Maximum delay between retries (1 hour)
+  exponential_base: 2.0  # Multiplier for exponential backoff
+  jitter_factor: 0.1  # Random jitter to prevent thundering herd (±10%)
+
 multi_agent_workflow:
   planner:
     enabled: true

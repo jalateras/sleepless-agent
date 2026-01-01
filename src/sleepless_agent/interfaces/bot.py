@@ -23,6 +23,7 @@ from sleepless_agent.tasks.utils import prepare_task_creation, slugify_project
 from sleepless_agent.utils.live_status import LiveStatusTracker
 from sleepless_agent.monitoring.report_generator import ReportGenerator
 from sleepless_agent.chat import ChatSessionManager, ChatExecutor, ChatHandler
+from sleepless_agent.storage.feedback import FeedbackStore, classify_reaction, FeedbackType
 
 
 class SlackBot:
@@ -38,6 +39,7 @@ class SlackBot:
         report_generator=None,
         live_status_tracker: Optional[LiveStatusTracker] = None,
         workspace_root: str = "./workspace",
+        feedback_store: Optional[FeedbackStore] = None,
     ):
         """Initialize Slack bot"""
         self.bot_token = bot_token
@@ -48,6 +50,7 @@ class SlackBot:
         self.report_generator = report_generator
         self.live_status_tracker = live_status_tracker
         self.workspace_root = Path(workspace_root)
+        self.feedback_store = feedback_store
         self.client = WebClient(token=bot_token)
         self.socket_mode_client = SocketModeClient(app_token=app_token, web_client=self.client)
 
@@ -90,8 +93,13 @@ class SlackBot:
 
     def handle_events_api(self, req: SocketModeRequest):
         """Handle events API"""
-        if req.payload["event"]["type"] == "message":
-            self.handle_message(req.payload["event"])
+        event = req.payload.get("event", {})
+        event_type = event.get("type")
+
+        if event_type == "message":
+            self.handle_message(event)
+        elif event_type == "reaction_added":
+            self.handle_reaction_added(event)
 
     def handle_message(self, event: dict):
         """Handle incoming messages"""
@@ -124,6 +132,136 @@ class SlackBot:
                     logger.debug(f"User mismatch: session is for {session.user_id}, message from {user}")
 
         logger.info(f"Message from {user}: {text}")
+
+    def handle_reaction_added(self, event: dict):
+        """Handle reaction_added events to capture user feedback on task outcomes.
+
+        When users react to task completion messages with thumbs up/down or similar
+        emojis, we record this as feedback to improve future task generation.
+        """
+        if not self.feedback_store:
+            logger.debug("Feedback store not configured, skipping reaction handling")
+            return
+
+        reaction = event.get("reaction", "")
+        user_id = event.get("user", "")
+        item = event.get("item", {})
+
+        # Only handle reactions to messages
+        if item.get("type") != "message":
+            return
+
+        channel_id = item.get("channel", "")
+        message_ts = item.get("ts", "")
+
+        # Classify the reaction early to avoid unnecessary API calls
+        feedback_type = classify_reaction(reaction)
+        if feedback_type == FeedbackType.NEUTRAL:
+            logger.debug(f"Ignoring neutral reaction '{reaction}' from {user_id}")
+            return
+
+        logger.info(f"Reaction added: {reaction} by {user_id} on message {message_ts}")
+
+        # Extract task ID from the message
+        task_id = self._extract_task_id_from_message(channel_id, message_ts)
+        if not task_id:
+            logger.debug(f"Could not extract task ID from message {message_ts}")
+            return
+
+        # Get task context for enriched feedback
+        task = self.task_queue.get_task(task_id)
+        if not task:
+            logger.debug(f"Task {task_id} not found for feedback")
+            return
+
+        # Determine generation source if task was auto-generated
+        generation_source = None
+        if task.priority == TaskPriority.GENERATED:
+            # Check generation history for source
+            generation_source = self._get_generation_source(task_id)
+
+        # Record the feedback
+        try:
+            self.feedback_store.record_feedback(
+                task_id=task_id,
+                user_id=user_id,
+                reaction=reaction,
+                message_ts=message_ts,
+                channel_id=channel_id,
+                task=task,
+                generation_source=generation_source,
+            )
+            logger.info(
+                f"Recorded {feedback_type.value} feedback for task {task_id} "
+                f"(reaction={reaction}, user={user_id})"
+            )
+        except Exception as e:
+            logger.error(f"Failed to record feedback for task {task_id}: {e}")
+
+    def _extract_task_id_from_message(self, channel_id: str, message_ts: str) -> Optional[int]:
+        """Extract task ID from a Slack message.
+
+        Looks for patterns like 'Task #123' or '#123' in the message text.
+        Returns the task ID if found, None otherwise.
+        """
+        import re
+
+        try:
+            # Fetch the message content from Slack
+            response = self.client.conversations_history(
+                channel=channel_id,
+                latest=message_ts,
+                inclusive=True,
+                limit=1,
+            )
+
+            messages = response.get("messages", [])
+            if not messages:
+                return None
+
+            message = messages[0]
+            text = message.get("text", "")
+
+            # Also check blocks for task IDs (Block Kit messages)
+            blocks = message.get("blocks", [])
+            for block in blocks:
+                if block.get("type") == "section":
+                    block_text = block.get("text", {}).get("text", "")
+                    text += " " + block_text
+
+            # Look for task ID patterns: "Task #123", "#123", "task_id=123"
+            patterns = [
+                r'Task\s*#(\d+)',
+                r'#(\d+)\b',
+                r'task[_\s]?id[=:\s]+(\d+)',
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    return int(match.group(1))
+
+            return None
+
+        except SlackApiError as e:
+            logger.error(f"Failed to fetch message {message_ts} from {channel_id}: {e}")
+            return None
+
+    def _get_generation_source(self, task_id: int) -> Optional[str]:
+        """Get the generation source (prompt archetype) for an auto-generated task."""
+        try:
+            # Query the generation_history table
+            from sqlalchemy.orm import Session
+            from sleepless_agent.core.models import GenerationHistory
+
+            with self.task_queue._session_scope() as session:
+                history = session.query(GenerationHistory).filter(
+                    GenerationHistory.task_id == task_id
+                ).first()
+                return history.source if history else None
+        except Exception as e:
+            logger.debug(f"Could not get generation source for task {task_id}: {e}")
+            return None
 
     def handle_slash_command(self, req: SocketModeRequest):
         """Handle slash commands"""

@@ -195,6 +195,118 @@ class TaskPool(Base):
         return f"<TaskPool(id={self.id}, priority={self.priority}, category={self.category})>"
 
 
+class FeedbackType(str, Enum):
+    """Types of user feedback on task outcomes"""
+    POSITIVE = "positive"  # thumbs_up, white_check_mark
+    NEGATIVE = "negative"  # thumbs_down, x
+    NEUTRAL = "neutral"  # other reactions
+
+
+class TaskFeedback(Base):
+    """Store user feedback on task outcomes for learning.
+
+    Captures Slack reactions on task completion messages to learn
+    which task types and patterns are valuable to users. This feedback
+    is used to weight auto-generation prompt selection.
+    """
+    __tablename__ = "task_feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, nullable=False)  # Reference to Task
+    user_id = Column(String(100), nullable=False)  # Slack user ID
+    feedback_type = Column(
+        SQLEnum(
+            FeedbackType,
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=False,
+        ),
+        nullable=False,
+    )
+    reaction = Column(String(50), nullable=False)  # Original emoji name
+
+    # Context snapshot for analysis
+    task_priority = Column(String(50), nullable=True)  # Priority at feedback time
+    task_type = Column(String(50), nullable=True)  # NEW or REFINE
+    generation_source = Column(String(100), nullable=True)  # If auto-generated, which prompt
+
+    # Slack context
+    message_ts = Column(String(50), nullable=True)  # Message that was reacted to
+    channel_id = Column(String(50), nullable=True)  # Channel where reaction occurred
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index('ix_feedback_task_id', 'task_id'),
+        Index('ix_feedback_user_id', 'user_id'),
+        Index('ix_feedback_type', 'feedback_type'),
+        Index('ix_feedback_created', 'created_at'),
+        # Composite for querying feedback patterns
+        Index('ix_feedback_type_source', 'feedback_type', 'generation_source'),
+    )
+
+    def __repr__(self):
+        return f"<TaskFeedback(task_id={self.task_id}, type={self.feedback_type}, reaction={self.reaction})>"
+
+
+class FailureType(str, Enum):
+    """Classification of task failure types"""
+    TRANSIENT = "transient"  # Rate limits, timeouts, connection errors - worth retrying
+    SUBSTANTIVE = "substantive"  # Wrong approach, missing deps - needs prompt refinement
+    UNKNOWN = "unknown"  # Couldn't classify
+
+
+class FailurePattern(Base):
+    """Track failure patterns for learning and retry suppression.
+
+    When tasks fail repeatedly with similar errors, this model stores
+    the pattern to suppress auto-generation of similar tasks and to
+    improve retry strategies.
+    """
+    __tablename__ = "failure_patterns"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pattern_hash = Column(String(64), unique=True, nullable=False)  # SHA256 of normalized error
+    error_signature = Column(String(500), nullable=False)  # Normalized error for display
+    failure_type = Column(
+        SQLEnum(
+            FailureType,
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=False,
+        ),
+        default=FailureType.UNKNOWN,
+        nullable=False,
+    )
+
+    # Occurrence tracking
+    occurrences = Column(Integer, default=1, nullable=False)
+    first_seen = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Suppression control
+    suppressed_until = Column(DateTime, nullable=True)  # If set, don't auto-generate similar
+    suppression_reason = Column(String(255), nullable=True)
+
+    # Related task context
+    sample_task_description = Column(Text, nullable=True)  # Example task that triggered this
+    sample_task_id = Column(Integer, nullable=True)
+
+    # Learning metadata
+    retry_success_count = Column(Integer, default=0, nullable=False)  # Times retry succeeded
+    retry_failure_count = Column(Integer, default=0, nullable=False)  # Times retry failed again
+
+    __table_args__ = (
+        Index('ix_failure_pattern_hash', 'pattern_hash'),
+        Index('ix_failure_type', 'failure_type'),
+        Index('ix_failure_last_seen', 'last_seen'),
+        Index('ix_failure_suppressed', 'suppressed_until'),
+    )
+
+    def __repr__(self):
+        return f"<FailurePattern(hash={self.pattern_hash[:8]}..., type={self.failure_type}, count={self.occurrences})>"
+
+
 def init_db(db_path: str) -> Session:
     """Initialize database and return session"""
     engine = create_engine(f"sqlite:///{db_path}", echo=False, future=True)

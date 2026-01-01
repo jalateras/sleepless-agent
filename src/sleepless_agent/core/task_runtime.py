@@ -10,12 +10,14 @@ from typing import Iterable, List, Optional, Set, TYPE_CHECKING
 from sleepless_agent.monitoring.logging import get_logger
 
 from sleepless_agent.core.models import TaskPriority
+from sleepless_agent.core.retry import RetryConfig, RetryManager
 from sleepless_agent.scheduling.scheduler import SmartScheduler
 from sleepless_agent.core.queue import TaskQueue
 from sleepless_agent.monitoring.report_generator import ReportGenerator, TaskMetrics
 from sleepless_agent.monitoring.monitor import HealthMonitor, PerformanceLogger
 from sleepless_agent.storage.git import GitManager
 from sleepless_agent.storage.results import ResultManager
+from sleepless_agent.storage.feedback import FeedbackStore
 from sleepless_agent.core.executor import ClaudeCodeExecutor
 from sleepless_agent.utils.exceptions import PauseException
 
@@ -42,6 +44,8 @@ class TaskRuntime:
         report_generator: ReportGenerator,
         bot: Optional[SlackBot],
         live_status_tracker,
+        feedback_store: Optional[FeedbackStore] = None,
+        retry_config: Optional[RetryConfig] = None,
     ):
         self.config = config
         self.task_queue = task_queue
@@ -54,6 +58,14 @@ class TaskRuntime:
         self.report_generator = report_generator
         self.bot = bot
         self.live_status_tracker = live_status_tracker
+        self.feedback_store = feedback_store
+
+        # Initialize retry manager
+        self.retry_config = retry_config or RetryConfig()
+        self.retry_manager = RetryManager(
+            config=self.retry_config,
+            feedback_store=feedback_store,
+        )
 
     async def execute(self, task) -> None:
         """Execute a single task asynchronously."""
@@ -209,16 +221,40 @@ class TaskRuntime:
             )
         except Exception as exc:
             processing_time = int(time.time() - start_time)
-            task_log.error("task.failure", error=str(exc), duration_s=processing_time)
-            self.task_queue.mark_failed(task.id, str(exc))
-            self._log_failure_metrics(task=task, duration=processing_time, error=str(exc))
-            task_log.info(
-                "task.complete",
-                status="failed",
-                duration_s=processing_time,
-                error=str(exc),
-            )
-            task_log.info("=" * 80)
+            error_str = str(exc)
+            task_log.error("task.failure", error=error_str, duration_s=processing_time)
+
+            # Record failure pattern for learning
+            if self.feedback_store:
+                try:
+                    self.feedback_store.record_failure(error_str, task=task)
+                except Exception as record_err:
+                    task_log.debug(f"Failed to record failure pattern: {record_err}")
+
+            # Check if we should retry
+            retry_decision = self.retry_manager.should_retry(task, error_str)
+
+            if retry_decision.should_retry:
+                # Schedule retry
+                await self._handle_retry(
+                    task=task,
+                    task_log=task_log,
+                    error=error_str,
+                    processing_time=processing_time,
+                    retry_decision=retry_decision,
+                )
+            else:
+                # Final failure - no more retries
+                self.task_queue.mark_failed(task.id, error_str)
+                self._log_failure_metrics(task=task, duration=processing_time, error=error_str)
+                task_log.info(
+                    "task.complete",
+                    status="failed",
+                    duration_s=processing_time,
+                    error=error_str,
+                    retry_info=retry_decision.reason,
+                )
+                task_log.info("=" * 80)
 
     async def _run_task_with_timeout(self, task):
         import json
@@ -252,6 +288,68 @@ class TaskRuntime:
             timeout_minutes = max(1, timeout // 60)
             logger.error("task.timeout", task_id=task.id, timeout_minutes=timeout_minutes)
             raise TimeoutError(f"Timed out after {timeout_minutes} minute(s)") from exc
+
+    async def _handle_retry(
+        self,
+        *,
+        task,
+        task_log,
+        error: str,
+        processing_time: int,
+        retry_decision,
+    ) -> None:
+        """Handle retry logic for a failed task.
+
+        Updates the attempt count, notifies the user, waits for the backoff
+        period, then re-executes the task.
+        """
+        from sleepless_agent.core.retry import RetryDecision
+
+        # Increment attempt count in the database
+        self.task_queue.increment_attempt_count(task.id)
+
+        # Log the retry
+        task_log.warning(
+            "task.retry.scheduled",
+            attempt=retry_decision.next_attempt,
+            max_attempts=self.retry_config.max_attempts,
+            delay_seconds=round(retry_decision.delay_seconds, 1),
+            error=error[:200],
+        )
+
+        # Notify user if assigned
+        if task.assigned_to and self.bot:
+            try:
+                retry_info = self.retry_manager.format_retry_info(task, error)
+                self.bot.send_message(
+                    task.assigned_to,
+                    f"⚠️ Task #{task.id} failed: {error[:200]}\n"
+                    f"🔄 {retry_info}"
+                )
+            except Exception as notify_err:
+                task_log.debug(f"Failed to send retry notification: {notify_err}")
+
+        # Wait for backoff period
+        if retry_decision.delay_seconds > 0:
+            task_log.info(
+                "task.retry.waiting",
+                delay_seconds=round(retry_decision.delay_seconds, 1),
+            )
+            await asyncio.sleep(retry_decision.delay_seconds)
+
+        # Update task state - refresh from DB to get current attempt count
+        refreshed_task = self.task_queue.get_task(task.id)
+        if not refreshed_task:
+            task_log.error("task.retry.task_not_found", task_id=task.id)
+            return
+
+        task_log.info(
+            "task.retry.executing",
+            attempt=retry_decision.next_attempt,
+        )
+
+        # Re-execute the task (this will call execute() again with updated attempt_count)
+        await self.execute(refreshed_task)
 
     def _maybe_commit_changes(
         self,

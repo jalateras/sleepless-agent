@@ -154,6 +154,20 @@ class TaskQueue(SQLiteStore):
             logger.error(f"Task {task_id} marked as failed: {error_message}")
         return task
 
+    def increment_attempt_count(self, task_id: int) -> Optional[Task]:
+        """Increment the attempt count for a task (used for retry tracking)."""
+
+        def _op(session: Session) -> Optional[Task]:
+            task = session.query(Task).filter(Task.id == task_id).first()
+            if task:
+                task.attempt_count = (task.attempt_count or 0) + 1
+            return task
+
+        task = self._run_write(_op)
+        if task:
+            logger.debug(f"Task {task_id} attempt count incremented to {task.attempt_count}")
+        return task
+
     def cancel_task(self, task_id: int) -> Optional[Task]:
         """Cancel pending task (soft delete)"""
 
