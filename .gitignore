@@ -223,7 +223,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 workspace/
-tests/
 
 # Claude Code
 .claude/

@@ -60,6 +60,7 @@ class ProjectGoal(BaseModel):
     description: Optional[str] = Field(None, description="Goal description for non-numeric goals")
     metric: Optional[str] = Field(None, description="Metric name for performance goals")
     areas: Optional[List[str]] = Field(None, description="Areas for documentation goals")
+    keywords: Optional[List[str]] = Field(None, description="Keywords for matching signals to this goal")
 
     @validator("areas")
     def validate_documentation_areas(cls, v: Optional[List[str]], values: Dict[str, Any]) -> Optional[List[str]]:
