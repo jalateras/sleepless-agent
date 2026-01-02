@@ -3,9 +3,16 @@ claude_code:
   model: claude-sonnet-4-5-20250929
   night_start_hour: 1
   night_end_hour: 9
-  threshold_day: 20.0
+  threshold_day: 50.0
   threshold_night: 80.0
   usage_command: claude /usage
+
+# Slack configuration
+slack:
+  # Default channel for notifications when task doesn't have a channel
+  # (e.g., auto-generated tasks). Get channel ID by right-clicking channel
+  # in Slack -> View channel details -> scroll to bottom for ID (starts with C)
+  default_channel: C0A682MJT99  # Set to your channel ID, e.g., "C0123456789"
 
 git:
   enabled: false  # Set to true to enable git commits and branching
@@ -87,47 +94,14 @@ context:
 
 auto_generation:
   enabled: true
+  # Uses engineering-lead or chief-of-staff to intelligently select next task
+  use_agent: true
+  agent_type: engineering-lead
+  # Fallback to prompt-based generation when use_agent is false
   prompts:
-    - name: refine_focused
+    - name: strategic
       prompt: |-
-        The workspace has multiple ongoing projects and tasks that need attention.
-
-        ## Current State
-        - Active tasks: {task_count} ({pending_count} pending, {in_progress_count} in progress)
-        - Many tasks are already in progress or pending
-
-        ## Available Tasks to Refine
-        {available_tasks}
-
-        ## Recent Work & Context
-        {recent_work}
-
-        ## Workspace Constraints
-        - Tasks execute in isolated directories: workspace/tasks/<task_id>/
-        - Each task only has access to its own workspace folder and workspace/shared/
-        - Do NOT reference workspace/data/ or other system directories in task descriptions
-        - REFINE tasks reuse existing task workspaces (no new folder created)
-
-        ## Task Generation
-        Generate ONE REFINE task to continue or improve existing work:
-        - Complete partial/incomplete tasks mentioned above
-        - Follow up on outstanding items and recommendations
-        - Enhance or improve existing projects in the workspace
-        - Fix issues or improve quality of current work
-        - Add missing components to existing implementations
-        - Expand documentation or analysis from previous tasks
-
-        IMPORTANT Format Requirements:
-        - To refine a specific task: Use [REFINE:#<task_id>] followed by description
-          Example: [REFINE:#2] Improve error handling and add edge case tests
-        - For general refinements: Use [REFINE] followed by description
-        - Your response MUST be 1-2 sentences max
-
-        Focus on completing or improving what already exists rather than starting new projects.
-      weight: 0.45
-    - name: balanced
-      prompt: |-
-        Review the workspace state and generate a valuable task.
+        You are an engineering lead selecting the next highest-value task for this workspace.
 
         ## Current State
         - Active tasks: {task_count} ({pending_count} pending, {in_progress_count} in progress)
@@ -138,72 +112,30 @@ auto_generation:
         ## Recent Work & Context
         {recent_work}
 
-        ## Workspace Constraints
-        - Tasks execute in isolated directories: workspace/tasks/<task_id>/
-        - Each task only has access to its own workspace folder and workspace/shared/
-        - Do NOT reference workspace/data/ or other system directories in task descriptions
-        - REFINE tasks reuse existing task workspaces (no new folder created)
+        ## Decision Framework
+        Analyze the workspace state and select ONE task using this priority order:
 
-        ## Task Generation
-        Generate ONE valuable task (NEW or REFINE):
-        - For REFINE: improve existing work, complete partial tasks, enhance current projects
-        - For NEW: create something useful, interesting, or educational
+        1. **Complete in-progress work first** - Unfinished tasks block value delivery
+        2. **Fix critical issues** - Bugs, failures, or blockers in existing work
+        3. **Enhance high-value deliverables** - Improve quality of important outputs
+        4. **Start strategic new work** - Only if existing work is solid
 
-        Task categories to consider:
-        - Software development (applications, scripts, tools, APIs)
-        - Data analysis and visualization projects
-        - Research and documentation (technical guides, comparisons, best practices)
-        - Creative writing (stories, tutorials, technical articles)
-        - System design and architecture documents
-        - Educational content and examples
-        - Automation and productivity improvements
-        - Analysis and evaluation reports
-
-        IMPORTANT Format Requirements:
-        - To refine a specific task: Use [REFINE:#<task_id>] followed by description
-          Example: [REFINE:#1] Add comprehensive testing suite with edge cases
-        - For general refinements: Use [REFINE] followed by description
-        - For new tasks: Use [NEW] followed by description
-        - Your response MUST be 1-2 sentences max
-      weight: 0.35
-    - name: new_friendly
-      prompt: |-
-        Generate an interesting and valuable task for the workspace.
-
-        ## Current State
-        - Active tasks: {task_count} ({pending_count} pending, {in_progress_count} in progress)
-        - Few tasks in queue - good time for new projects!
-
-        ## Available Tasks to Refine
-        {available_tasks}
+        ## Task Selection Criteria
+        - Highest impact with reasonable effort
+        - Builds on existing momentum and context
+        - Advances project goals (check projects.yaml if available)
+        - Avoids duplicating recent work
+        - Concrete and actionable (not vague explorations)
 
         ## Workspace Constraints
-        - Tasks execute in isolated directories: workspace/tasks/<task_id>/
-        - Each task only has access to its own workspace folder and workspace/shared/
-        - Do NOT reference workspace/data/ or other system directories in task descriptions
-        - REFINE tasks reuse existing task workspaces (no new folder created)
+        - Tasks execute in: workspace/tasks/<task_id>/
+        - Access limited to: task folder + workspace/shared/
+        - REFINE tasks reuse existing workspaces
 
-        ## Task Generation
-        Generate ONE innovative task that creates value.
+        ## Output Format (CRITICAL)
+        Output ONLY one line in this exact format:
+        - To refine: [REFINE:#<task_id>] <specific improvement in 1-2 sentences>
+        - For new: [NEW] <specific deliverable in 1-2 sentences>
 
-        Areas to explore:
-        - Build practical tools and utilities
-        - Create educational content and tutorials
-        - Develop software applications or scripts
-        - Write comprehensive documentation or guides
-        - Design systems and architectures
-        - Analyze and compare technologies or approaches
-        - Generate creative content (technical writing, examples)
-        - Research and summarize complex topics
-        - Create data visualizations or analysis
-        - Develop proof-of-concepts or experiments
-
-        Can be NEW (fresh project) or REFINE (improve existing work) - choose what would be most valuable.
-
-        IMPORTANT Format Requirements:
-        - To refine a specific task: Use [REFINE:#<task_id>] followed by description
-          Example: [REFINE:#3] Expand analysis with performance benchmarks
-        - For general refinements: Use [REFINE] followed by description
-        - For new tasks: Use [NEW] followed by description
-        - Your response MUST be 1-2 sentences max
-      weight: 0.20
+        Be specific about WHAT will be delivered, not just what will be "explored" or "researched".
+      weight: 1.0

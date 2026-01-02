@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import signal
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -141,10 +140,13 @@ class SleeplessAgent:
         # Initialize checkpoint manager for human-in-the-loop approvals
         checkpoint_config_dict = getattr(self.config, 'checkpoints', {}) or {}
         checkpoint_config = CheckpointConfig.from_dict(checkpoint_config_dict)
+        slack_config = getattr(self.config, 'slack', {}) or {}
+        default_channel = slack_config.get('default_channel') if isinstance(slack_config, dict) else getattr(slack_config, 'default_channel', None)
         self.checkpoint_manager = CheckpointManager(
             db_path=str(self.config.agent.db_path),
             config=checkpoint_config,
             slack_client=None,  # Will be set after bot is initialized
+            default_channel=default_channel,
         )
 
         self.bot = SlackBot(
@@ -169,6 +171,7 @@ class SleeplessAgent:
         self.notification_manager = NotificationManager(
             config=notification_config,
             slack_client=self.bot.client,
+            default_channel=default_channel,
         )
 
         # Initialize stream manager for real-time task output streaming
@@ -272,12 +275,12 @@ class SleeplessAgent:
         )
 
     def _signal_handler(self, sig, _frame) -> None:
-        logger.info(f"Received signal {sig}, shutting down...")
+        logger.info(f"Received signal {sig}, shutting down gracefully...")
         self.running = False
         if self.live_status_tracker:
             self.live_status_tracker.clear_all()
-        # Don't call bot.stop() here - let the finally block handle cleanup
-        sys.exit(0)
+        # Don't call sys.exit() - let the async loop exit naturally
+        # The main loop checks self.running and will exit cleanly
 
     async def run(self) -> None:
         self.running = True
@@ -333,11 +336,19 @@ class SleeplessAgent:
 
         except KeyboardInterrupt:
             logger.info("Agent interrupted by user")
+        except asyncio.CancelledError:
+            logger.info("Agent shutdown requested")
         except Exception as exc:
             logger.error(f"Unexpected error in main loop: {exc}")
         finally:
-            self.monitor.log_health_report()
-            self.bot.stop()
+            try:
+                self.monitor.log_health_report()
+            except Exception:
+                pass  # Don't fail during shutdown
+            try:
+                self.bot.stop()
+            except Exception:
+                pass  # Don't fail during shutdown
             logger.info("Sleepless Agent stopped")
 
     async def _process_tasks(self) -> None:

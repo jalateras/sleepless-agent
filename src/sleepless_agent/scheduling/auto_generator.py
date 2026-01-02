@@ -296,19 +296,26 @@ class AutoTaskGenerator:
         return "\n".join(lines)
 
     async def _generate_task(self) -> Optional[Task]:
-        """Generate a task using the configured prompt archetypes."""
+        """Generate a task using agent-based or prompt-based approach."""
         # Gather codebase context first
         context = self._gather_codebase_context()
 
-        prompt_config = self._select_prompt(context)
-        if not prompt_config:
-            logger.warning("autogen.no_prompt_available")
-            return None
+        # Check if agent-based generation is enabled
+        use_agent = getattr(self.config, 'use_agent', False)
+        if use_agent:
+            agent_type = getattr(self.config, 'agent_type', 'engineering-lead')
+            self._last_generation_source = f"agent:{agent_type}"
+            logger.debug("autogen.agent.begin", agent_type=agent_type, task_count=context['task_count'])
+            task_desc = await self._generate_from_agent(agent_type, context)
+        else:
+            prompt_config = self._select_prompt(context)
+            if not prompt_config:
+                logger.warning("autogen.no_prompt_available")
+                return None
 
-        self._last_generation_source = prompt_config.name
-        logger.debug("autogen.prompt.begin", prompt=prompt_config.name, task_count=context['task_count'], mode=context['mode'])
-
-        task_desc = await self._generate_from_prompt(prompt_config, context)
+            self._last_generation_source = prompt_config.name
+            logger.debug("autogen.prompt.begin", prompt=prompt_config.name, task_count=context['task_count'], mode=context['mode'])
+            task_desc = await self._generate_from_prompt(prompt_config, context)
 
         if not task_desc:
             return None
@@ -355,14 +362,16 @@ class AutoTaskGenerator:
 
         # Record in generation history
         usage_percent = self.budget_manager.get_usage_percent()
+        # Use generation source (either agent type or prompt name)
+        source_name = self._last_generation_source or "unknown"
         history = GenerationHistory(
             task_id=task.id,
-            source=prompt_config.name,
+            source=source_name,
             usage_percent_at_generation=usage_percent,
             source_metadata=json.dumps({
                 "priority": priority.value,
                 "task_type": task_type.value,
-                "prompt_name": prompt_config.name,
+                "generation_source": source_name,
                 "task_count_at_generation": context['task_count'],
                 "generation_mode": context['mode'],
                 "refines_task_id": refines_task_id,
@@ -511,6 +520,99 @@ class AutoTaskGenerator:
         # Default to NEW if no prefix found
         return (task_desc, TaskType.NEW)
 
+    async def _generate_from_agent(self, agent_type: str, context: dict) -> Optional[str]:
+        """Generate a task by invoking an agent (engineering-lead or chief-of-staff).
+
+        The agent analyzes the codebase and projects.yaml to recommend the next
+        best task to work on, returning a properly formatted [NEW] or [REFINE] task.
+        """
+        # Build prompt that instructs Claude to use the agent
+        prompt = self._build_agent_prompt(agent_type, context)
+
+        options = self._build_agent_options(self.default_model)
+        text_segments: list[str] = []
+
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            text_segments.append(block.text)
+        except (CLINotFoundError, ProcessError, CLIConnectionError, CLIJSONDecodeError) as exc:
+            self._log_sdk_failure(exc, prompt_name=f"agent:{agent_type}")
+            return None
+        except Exception as exc:  # pragma: no cover - unexpected failure
+            self._log_sdk_failure(exc, prompt_name=f"agent:{agent_type}", unexpected=True)
+            return None
+
+        full_text = "".join(text_segments).strip()
+        if not full_text:
+            return None
+
+        # Extract the task from agent output (look for [NEW] or [REFINE] markers)
+        return self._extract_task_from_agent_output(full_text)
+
+    def _build_agent_prompt(self, agent_type: str, context: dict) -> str:
+        """Build the prompt that instructs Claude to use an agent for task generation."""
+        return f"""You are helping an autonomous agent system select the next best task to work on.
+
+Use the Task tool to invoke the `{agent_type}` agent with the following prompt:
+
+"Analyze this workspace and recommend ONE task to work on next.
+
+Current State:
+- Active tasks: {context['task_count']} ({context['pending_count']} pending, {context['in_progress_count']} in progress)
+
+Available Tasks to Refine:
+{context['available_tasks']}
+
+Recent Work:
+{context['recent_work']}
+
+Requirements:
+1. Analyze the codebase, any projects.yaml configuration, and recent work
+2. Identify the single highest-value task right now
+3. Output ONLY the task in this exact format:
+   - For new work: [NEW] <1-2 sentence task description>
+   - For refining existing: [REFINE:#<task_id>] <1-2 sentence description>
+4. Be specific and actionable
+5. Consider project goals and priorities if defined in projects.yaml
+
+Output format (CRITICAL - output ONLY this, nothing else):
+[NEW] or [REFINE:#id] followed by the task description in 1-2 sentences."
+
+After getting the agent's response, output ONLY the [NEW] or [REFINE] task line, nothing else."""
+
+    def _extract_task_from_agent_output(self, output: str) -> Optional[str]:
+        """Extract the [NEW] or [REFINE] task from agent output."""
+        import re
+
+        # Look for [NEW] or [REFINE] patterns
+        patterns = [
+            r'(\[NEW\][^\n]+)',
+            r'(\[REFINE(?::#\d+)?\][^\n]+)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                task = match.group(1).strip()
+                logger.debug("autogen.agent.task_extracted", task=task[:80])
+                return task
+
+        # Fallback: if no marker found but there's text, treat as NEW
+        lines = [l.strip() for l in output.split('\n') if l.strip()]
+        if lines:
+            # Take the last non-empty line as the task
+            task = lines[-1]
+            if not task.upper().startswith('['):
+                task = f"[NEW] {task}"
+            logger.debug("autogen.agent.task_fallback", task=task[:80])
+            return task
+
+        logger.warning("autogen.agent.no_task_found", output_preview=output[:200])
+        return None
+
     async def _generate_from_prompt(self, prompt_config: AutoTaskPromptConfig, context: dict) -> Optional[str]:
         """Execute the configured prompt via Claude and return the response."""
         try:
@@ -569,6 +671,25 @@ class AutoTaskGenerator:
             model=model,
             cwd=str(shared_dir),
             allowed_tools=[],  # No file access needed for task generation
+        )
+
+    def _build_agent_options(self, model: str) -> ClaudeAgentOptions:
+        """Create Claude SDK options for agent-based task generation.
+
+        Enables the Task tool so Claude can spawn specialized agents like
+        engineering-lead or chief-of-staff to analyze the codebase and
+        recommend the next best task.
+        """
+        from pathlib import Path
+
+        # Use workspace root as cwd so agents can access project files
+        workspace_dir = Path("./workspace")
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        return ClaudeAgentOptions(
+            model=model,
+            cwd=str(workspace_dir),
+            allowed_tools=["Task", "Read", "Glob", "Grep"],  # Enable agent spawning and code reading
         )
 
     @staticmethod

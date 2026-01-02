@@ -102,6 +102,7 @@ class CheckpointManager(SQLiteStore):
         db_path: str,
         config: CheckpointConfig,
         slack_client: Optional[Any] = None,
+        default_channel: Optional[str] = None,
     ):
         """Initialize checkpoint manager.
 
@@ -109,10 +110,12 @@ class CheckpointManager(SQLiteStore):
             db_path: Path to SQLite database
             config: Checkpoint configuration
             slack_client: Slack WebClient for sending messages
+            default_channel: Fallback Slack channel for tasks without a channel
         """
         super().__init__(db_path)
         self.config = config
         self.slack_client = slack_client
+        self.default_channel = default_channel
 
     def create_checkpoint(
         self,
@@ -310,7 +313,9 @@ class CheckpointManager(SQLiteStore):
             logger.warning("checkpoint.no_slack_client", checkpoint_id=checkpoint.id)
             return None
 
-        if not checkpoint.channel_id:
+        # Use checkpoint's channel or fall back to default
+        channel_id = checkpoint.channel_id or self.default_channel
+        if not channel_id:
             logger.warning("checkpoint.no_channel", checkpoint_id=checkpoint.id)
             return None
 
@@ -322,7 +327,7 @@ class CheckpointManager(SQLiteStore):
 
         try:
             response = self.slack_client.chat_postMessage(
-                channel=checkpoint.channel_id,
+                channel=channel_id,
                 thread_ts=checkpoint.thread_ts,
                 text=f"Approval required: {checkpoint.title}",
                 blocks=blocks,

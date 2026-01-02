@@ -19,6 +19,7 @@ Sleepless Agent is an autonomous AI system that transforms your Claude Code Pro 
 ## Documentation Overview
 
 ### 📚 Getting Started
+- [**Complete Setup Guide**](complete-setup-guide.md) - Comprehensive step-by-step guide (start here!)
 - [**Quickstart**](quickstart.md) - Get running in 5 minutes
 - [**Installation**](installation.md) - Detailed setup instructions
 - [**FAQ**](faq.md) - Frequently asked questions

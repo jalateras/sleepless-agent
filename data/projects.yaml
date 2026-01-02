@@ -1,6 +1,272 @@
+# ==============================================================================
 # Project Orchestrator Configuration
-# Copy from data/projects.example.yaml and customize
+# ==============================================================================
+#
+# This file defines projects that the sleepless-agent will monitor and
+# generate tasks for. Each project can have:
+#
+#   - Local workspace path for codebase analysis
+#   - Optional GitHub integration for issue/PR monitoring
+#   - Goals that guide task generation and prioritization
+#   - Constraints on what work should NOT be done
+#
+# Copy this file to data/projects.yaml and customize for your projects.
+#
+# ==============================================================================
+# USAGE
+# ==============================================================================
+#
+# CLI Commands:
+#   sle orchestrator status           # Show all project configurations
+#   sle orchestrator goals            # Show project goals
+#   sle orchestrator health           # Show project health metrics
+#   sle orchestrator validate         # Validate configuration
+#   sle orchestrator status -p myapp  # Show specific project
+#
+# ==============================================================================
 
 version: "1.0"
 
-projects: []
+projects:
+  # ==========================================================================
+  # Example 1: Full-featured project with GitHub integration
+  # ==========================================================================
+  # This is a complete example showing all available options.
+  #
+  # - id: sleepless-agent
+  #   name: "Sleepless Agent"
+  #
+  #   # Required: Path to local project directory
+  #   # Use ~ for home directory expansion
+  #   local_path: ~/workspace/sleepless-agent
+  #
+  #   # Optional: GitHub integration for issue/PR monitoring
+  #   github:
+  #     # Required: Repository in "owner/repo" format
+  #     repo: jalateras/sleepless-agent
+  #
+  #     # Optional: Default branch (default: main)
+  #     base_branch: main
+  #
+  #     # Optional: GitHub auth token (or use GITHUB_TOKEN env var)
+  #     # Needed for private repos and higher rate limits
+  #     auth_token: ${GITHUB_TOKEN}
+  #
+  #   # Optional: Define project goals for task alignment
+  #   goals:
+  #     # Type: coverage - Target code coverage percentage
+  #     - type: coverage
+  #       metric: line_coverage  # Optional: Which coverage metric
+  #       target: 80            # Target percentage
+  #       description: "Achieve 80% code coverage"
+  #       keywords: [test, coverage, pytest]  # Optional: For signal matching
+  #
+  #     # Type: documentation - Improve documentation
+  #     - type: documentation
+  #       description: "Complete API documentation"
+  #       areas: [README, API, examples]  # Areas to improve
+  #       keywords: [doc, readme, docs]
+  #
+  #     # Type: performance - Improve performance metrics
+  #     - type: performance
+  #       metric: startup_time
+  #       target_ms: 500  # Target in milliseconds
+  #       description: "Reduce startup time to 500ms"
+  #       keywords: [slow, performance, optimize]
+  #
+  #     # Type: testing - Add or improve tests
+  #     - type: testing
+  #       target: 100  # Target number of tests
+  #       description: "Add comprehensive test suite"
+  #       keywords: [test, pytest, unittest]
+  #
+  #     # Type: feature - Implement a specific feature
+  #     - type: feature
+  #       description: "Add real-time streaming support"
+  #       keywords: [stream, websocket, realtime]
+  #
+  #     # Type: security - Fix security issues
+  #     - type: security
+  #       description: "Address all security vulnerabilities"
+  #       keywords: [security, vulnerability, auth]
+  #
+  #   # Optional: Constraints prevent certain types of work
+  #   constraints:
+  #     - "No breaking changes to config.yaml"
+  #     - "Maintain Python 3.11+ compatibility"
+  #     - "No changes without tests"
+  #
+  #   # Optional: How often to analyze project (default: 4 hours)
+  #   check_interval_hours: 4
+  #
+  #   # Optional: Priority for cross-project task selection
+  #   # Maps to priority_weight: low=3, medium=5, high=7, urgent=10
+  #   priority: high
+  #
+  #   # Optional: Enable/disable monitoring (default: true)
+  #   enabled: true
+
+  # ==========================================================================
+  # Example 2: GitHub-only project (auto-cloned to managed workspace)
+  # ==========================================================================
+  # Set local_path to null to let the orchestrator manage the workspace.
+  # The project will be cloned to workspace/projects/<project-id>/.
+  #
+  # - id: oss-library
+  #   name: "Open Source Library"
+  #   local_path: null  # Auto-managed by orchestrator
+  #   github:
+  #     repo: user/oss-library
+  #     base_branch: main
+  #   goals:
+  #     - type: coverage
+  #       target: 90
+  #     - type: feature
+  #       description: "Add async support"
+  #   check_interval_hours: 8
+  #   priority: medium
+  #   enabled: true
+
+  # ==========================================================================
+  # Example 3: Local-only project (no GitHub integration)
+  # ==========================================================================
+  # Monitors only local signals (TODOs, tests, coverage, imports).
+  # No GitHub issues/PRs will be tracked.
+  #
+  # - id: side-project
+  #   name: "Side Project"
+  #   local_path: ~/projects/side-project
+  #   goals:
+  #     - type: feature
+  #       description: "MVP implementation"
+  #     - type: testing
+  #       description: "Add comprehensive tests"
+  #   check_interval_hours: 24
+  #   priority: low
+  #   enabled: true
+
+  # ==========================================================================
+  # Example 4: Minimal configuration
+  # ==========================================================================
+  # Only required fields are shown. All other values use defaults.
+  #
+  # - id: my-project
+  #   name: "My Project"
+  #   local_path: ~/code/my-project
+  #   # All other fields are optional with sensible defaults
+
+# ==============================================================================
+# FIELD REFERENCE
+# ==============================================================================
+#
+# REQUIRED FIELDS:
+#   id              - Unique project identifier (used in task metadata)
+#   name            - Human-readable project name
+#   local_path      - Path to local project (or null for auto-managed)
+#
+# OPTIONAL FIELDS:
+#   github          - GitHub integration (see below)
+#   goals           - List of project goals (see below)
+#   constraints     - List of work constraints (see below)
+#   check_interval_hours  - How often to analyze (default: 4)
+#   priority        - Project priority level (default: medium)
+#   enabled         - Whether monitoring is active (default: true)
+#
+# ==============================================================================
+# GITHUB CONFIGURATION
+# ==============================================================================
+#
+# github:
+#   repo              - Required: "owner/repo" format
+#   base_branch       - Optional: Default branch (default: main)
+#   auth_token        - Optional: GitHub token or ${ENV_VAR}
+#
+# GitHub integration provides:
+#   - Issue tracking with triage and stale detection
+#   - PR monitoring (merge conflicts, approvals, stale reminders)
+#   - CI failure detection
+#   - Dependabot alert consumption
+#
+# ==============================================================================
+# GOAL TYPES
+# ==============================================================================
+#
+# coverage:
+#   metric           - Optional: Specific metric (line_coverage, branch_coverage)
+#   target           - Target percentage (0-100)
+#   description      - Human-readable description
+#   keywords         - Optional: List of keywords for signal matching
+#
+# documentation:
+#   areas            - List of areas to improve (README, API, examples, etc.)
+#   description      - Human-readable description
+#   keywords         - Optional: List of keywords for signal matching
+#
+# performance:
+#   metric           - Which performance metric (startup_time, response_time, etc.)
+#   target_ms        - Target value in milliseconds
+#   description      - Human-readable description
+#   keywords         - Optional: List of keywords for signal matching
+#
+# testing:
+#   target           - Target number of tests or coverage percentage
+#   description      - Human-readable description
+#   keywords         - Optional: List of keywords for signal matching
+#
+# feature:
+#   description      - Feature description
+#   keywords         - Optional: List of keywords for signal matching
+#
+# security:
+#   description      - Security objective
+#   keywords         - Optional: List of keywords for signal matching
+#
+# tech_debt:
+#   description      - Debt reduction goal
+#   keywords         - Optional: List of keywords for signal matching
+#
+# ==============================================================================
+# PRIORITY LEVELS
+# ==============================================================================
+#
+# Priority levels map to internal priority_weight values:
+#
+#   low     -> weight 3  (Background work, only when idle)
+#   medium  -> weight 5  (Standard priority)
+#   high    -> weight 7  (Important project, check frequently)
+#   urgent  -> weight 10 (Critical project, prioritize above all else)
+#
+# Higher weight = higher priority in cross-project task selection.
+#
+# ==============================================================================
+# SIGNAL SOURCES
+# ==============================================================================
+#
+# Local Signals (always collected):
+#   - TODO/FIXME comments with context
+#   - Test failures from pytest/jest runs
+#   - Coverage gaps below target
+#   - Broken imports
+#   - Stale git branches (> 30 days)
+#
+# GitHub Signals (when github is configured):
+#   - Open issues with triage
+#   - Pull requests (stale, conflicts, no approvals)
+#   - CI/CD failures
+#   - Dependabot alerts (high/critical severity)
+#
+# ==============================================================================
+# CONSTRAINT EXAMPLES
+# ==============================================================================
+#
+# Constraints prevent certain types of work from being generated:
+#
+# constraints:
+#   - "No breaking changes to config.yaml"
+#   - "No changes to database schema without migration"
+#   - "Maintain Python 3.11+ compatibility"
+#   - "No changes without tests"
+#   - "Skip vendor/ directory"
+#   - "No modifications to generated code"
+#
+# ==============================================================================

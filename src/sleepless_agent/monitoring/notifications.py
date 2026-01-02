@@ -125,15 +125,18 @@ class NotificationManager:
         self,
         config: NotificationConfig,
         slack_client: Optional[Any] = None,
+        default_channel: Optional[str] = None,
     ):
         """Initialize notification manager.
 
         Args:
             config: Notification configuration
             slack_client: Slack WebClient for sending messages
+            default_channel: Fallback Slack channel for tasks without a channel
         """
         self.config = config
         self.slack_client = slack_client
+        self.default_channel = default_channel
 
         # State tracking per task
         self._task_state: dict[int, dict] = {}
@@ -529,7 +532,7 @@ class NotificationManager:
         if not state:
             return
 
-        channel_id = state.get("channel_id")
+        channel_id = state.get("channel_id") or self.default_channel
         thread_ts = state.get("thread_ts")
 
         if not channel_id:
