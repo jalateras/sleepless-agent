@@ -320,6 +320,12 @@ class SleeplessAgent:
                             )
                     except Exception as exc:
                         logger.error(f"Error in project analysis: {exc}")
+                else:
+                    logger.info(
+                        "daemon.scheduler_paused",
+                        pause_seconds=int(pause_seconds),
+                        message="Skipping auto-generation and project analysis while paused",
+                    )
 
                 health_check_counter += 1
                 if health_check_counter >= 12:

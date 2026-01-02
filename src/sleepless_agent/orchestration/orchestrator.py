@@ -162,8 +162,22 @@ class ProjectOrchestrator:
         all_signals: Dict[str, List] = {}
         projects_to_check = []
 
-        for project in self.get_enabled_projects():
+        enabled_projects = self.get_enabled_projects()
+        logger.info(
+            "orchestrator.analysis_starting",
+            enabled_projects=len(enabled_projects),
+            project_ids=[p.id for p in enabled_projects],
+        )
+
+        for project in enabled_projects:
             if not self.should_check_project(project):
+                logger.debug(
+                    "orchestrator.project_skipped",
+                    project_id=project.id,
+                    reason="not_due_for_check",
+                    last_check=self._last_check_time.get(project.id),
+                    interval_hours=project.check_interval_hours,
+                )
                 continue
 
             projects_to_check.append(project)
@@ -266,13 +280,15 @@ class ProjectOrchestrator:
         """
         from sleepless_agent.orchestration.prioritization import PriorityTier
 
+        # Map PriorityTier to TaskPriority
+        # TaskPriority has: SERIOUS (high), THOUGHT (medium), GENERATED (auto)
         tier_mapping = {
-            PriorityTier.CRITICAL: TaskPriority.HIGH,
-            PriorityTier.HIGH: TaskPriority.HIGH,
+            PriorityTier.CRITICAL: TaskPriority.SERIOUS,
+            PriorityTier.HIGH: TaskPriority.SERIOUS,
             PriorityTier.MEDIUM: TaskPriority.THOUGHT,
-            PriorityTier.LOW: TaskPriority.LOW,
+            PriorityTier.LOW: TaskPriority.GENERATED,
         }
-        return tier_mapping.get(tier, TaskPriority.THOUGHT)
+        return tier_mapping.get(tier, TaskPriority.GENERATED)
 
     def get_project_health(self, project_id: str) -> Dict[str, any]:
         """Get health status for a specific project.
