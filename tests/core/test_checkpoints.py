@@ -314,7 +314,8 @@ class TestRequestApproval:
             if checkpoint:
                 manager.resolve(checkpoint.id, CheckpointStatus.APPROVED, "U123")
 
-        asyncio.create_task(auto_approve())
+        # Keep a reference to prevent task garbage collection
+        approval_task = asyncio.create_task(auto_approve())
 
         result = await manager.request_approval(
             task=sample_task,
@@ -331,6 +332,9 @@ class TestRequestApproval:
         assert call_args.kwargs["channel"] == "C123456"
         assert "blocks" in call_args.kwargs
         assert "Approval required" in call_args.kwargs["text"]
+
+        # Ensure background task completes to avoid warnings
+        await approval_task
 
     @pytest.mark.asyncio
     async def test_request_approval_skipped_when_disabled(

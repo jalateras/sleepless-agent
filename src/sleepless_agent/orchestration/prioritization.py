@@ -458,7 +458,10 @@ class CrossProjectPrioritizer:
         """
         parts = []
 
-        # Action verb
+        # Main description (use title or description based on source)
+        main_text = signal.description if signal.source.value == "todo" else signal.title
+
+        # Action verb (only add if not already present in main_text)
         verbs = {
             SignalType.BUGFIX: "Fix",
             SignalType.FEATURE: "Implement",
@@ -469,13 +472,13 @@ class CrossProjectPrioritizer:
             SignalType.SECURITY: "Fix security issue:",
             SignalType.PERFORMANCE: "Optimize",
         }
-        parts.append(verbs.get(signal.type, "Address"))
+        verb = verbs.get(signal.type, "Address")
 
-        # Main description
-        if signal.source.value == "todo":
-            parts.append(signal.description)
-        else:
-            parts.append(signal.title)
+        # Avoid duplicate verbs (e.g., "Fix Fix failing test")
+        if not main_text.lower().startswith(verb.lower()):
+            parts.append(verb)
+
+        parts.append(main_text)
 
         # Location
         if signal.location:

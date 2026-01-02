@@ -201,11 +201,32 @@ class ProjectOrchestrator:
             self._projects,
         )
 
-        # Step 3: Submit top tasks (limit to prevent overwhelming)
+        # Step 3: Submit top tasks with deduplication
         results = {p.id: 0 for p in projects_to_check}
-        max_tasks = 10  # Limit total tasks per cycle
+        max_tasks_per_project = 1  # Only queue 1 task per project per cycle
 
-        for ranked_task in ranked_tasks[:max_tasks]:
+        # Get existing pending task descriptions to avoid duplicates
+        existing_pending = self.task_queue.get_pending_tasks()
+        existing_descriptions = {t.description.lower()[:100] for t in existing_pending}
+
+        # Track descriptions we're adding this cycle
+        added_descriptions: set[str] = set()
+
+        for ranked_task in ranked_tasks:
+            # Stop if we've hit the per-project limit
+            if results[ranked_task.project_id] >= max_tasks_per_project:
+                continue
+
+            # Skip if similar task already exists (check first 100 chars)
+            desc_key = ranked_task.description.lower()[:100]
+            if desc_key in existing_descriptions or desc_key in added_descriptions:
+                logger.debug(
+                    "orchestrator.task_skipped_duplicate",
+                    project_id=ranked_task.project_id,
+                    description_preview=ranked_task.description[:50],
+                )
+                continue
+
             try:
                 # Map priority tier to TaskPriority
                 task_priority = self._tier_to_priority(ranked_task.priority_tier)
@@ -217,6 +238,7 @@ class ProjectOrchestrator:
                     project_name=ranked_task.project_name,
                 )
                 results[ranked_task.project_id] += 1
+                added_descriptions.add(desc_key)
             except Exception as e:
                 logger.error(
                     "orchestrator.task_creation_failed",
